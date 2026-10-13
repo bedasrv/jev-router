@@ -687,6 +687,11 @@ Branch protection requires `fmt`, `clippy`, `test`, `deny-bans` + up-to-date bra
 
 `permissions: {contents: read, packages: write}`. `docker/setup-buildx-action@v4` → `docker/login-action@v4` (`ghcr.io`, `github.actor`, `GITHUB_TOKEN`) → `docker/metadata-action@v6` (tags `sha` + `latest` on default branch + `ref` on tag) → `docker/build-push-action@v7` (`push: true`, `cache-from/type=gha`, `cache-to/type=gha,mode=max`, `provenance: mode=max` default, `sbom: true`). Registry cache (`type=registry`) is rejected for billed storage — GHA cache only; keep only `latest` + `sha-*`, delete untagged. Musl build stays inside the Dockerfile (no QEMU/cross in GHA until `arm64` is actually needed). Size gate step after push fails over 25MB. `cosign`/attestations skipped until third-party distribution (default GH provenance + pinned base digests + Dependabot suffice).
 
-### 14.4 Renovate scope
+### 14.4 Git hygiene (enforced)
+
+- `master` stays deployable and up to date: land via PR only (no direct pushes except fast-forward sync), rebase or squash-merge, CI green required before merge.
+- Prune dead/stale branches: `git fetch origin --prune` on sync; delete merged branches (`git branch -d`, `git push origin --delete`), and sweep remote-tracking refs monthly. No long-lived feature branches — short PRs off `master`, merged or closed within days.
+
+### 14.5 Renovate scope
 
 `.github/dependabot.yml` weekly for `cargo` + `docker` + `github-actions` (3-day default cooldown applies; security updates exempt). Pin every `uses:` to SHA (or `@vX` minimum), let Dependabot advance. `cargo-mutants` runs nightly/weekly scoped (`--file src/scoring.rs`, `--in-diff` on PRs) — never a per-PR gate (20min–1h); `proptest` covers the per-PR math instead.
