@@ -1,6 +1,6 @@
 # jev-router — a Jev-routed model gateway for Warslop (free + paid pools)
 
-**Status: proposal v1.6, 2026-10-13 (owner direction: Rust + containers for external deployment — D8 flipped to Rust/axum/distroless with image-size gate; verification round 4 fixes applied: RUSTSEC id struck, distroless debian13, tower-http 0.6.x pin, OmniRoute 20-strategy + affinity + combo-path corrections, AA new-path downgraded to provisional, Go-page + OpenRouter-limits + confidence facts re-pinned. Nothing here is built yet).** This is the project spec and build plan
+**Status: proposal v1.7, 2026-10-13 (owner direction: Rust + containers for external deployment — D8 flipped to Rust/axum/distroless with image-size gate; verification round 4 fixes applied: RUSTSEC id struck, distroless debian13, tower-http 0.6.x pin, OmniRoute 20-strategy + affinity + combo-path corrections, AA new-path downgraded to provisional, Go-page + OpenRouter-limits + confidence facts re-pinned; GHCR deployment + versioning specified (§14.3 rewritten, §9.1/§10–§11/§13 touched, Docker/GH action versions re-pinned live 2026-10-13). Nothing here is built yet).** This is the project spec and build plan
 for `~/src/jev-router` (GitHub `bedasrv/jev-router`). `[owner]` marks a decision the owner already gave;
 everything else is a coordinator proposal the owner can veto. Verified facts carry the date they were
 checked (all `2026-10-12` unless noted).
@@ -503,8 +503,8 @@ either way.
   §9.3. Bearer `JEVR_API_KEY`. Container bind is `127.0.0.1:4098` in the host netns (`network_mode: host`, same as OmniRoute — same-box Warslop assumed); if Warslop runs off-box, add a Tailscale bind instead of widening to LAN — never `0.0.0.0` with a billable key behind it.
 - `GET /v1/models` — exactly two entries: `free`, `paid` (`{id, object:"model", created, owned_by:"jev-router", context_length}`), each with `context_length` = the max known over its
   pool (unknown-context members ignored; if all unknown, omit the field rather than lie). Max lets Warslop send large turns; jev-router's eligibility still picks a fitting model or returns `context_too_long`.
-- `GET /healthz` — `{"ok":true,"index":<version>,"pools":{"free":n,"paid":n},"jev":"ok|degraded"}` (no auth,
-  loopback only). Counts are current pool member counts; `jev=degraded` when all three `jev:<source>` keys are cooling, else `ok`.
+- `GET /healthz` — `{"ok":true,"version":"<image tag, e.g. 0.3.1|edge>","revision":"<git sha>","index":<version>,"pools":{"free":n,"paid":n},"jev":"ok|degraded"}` (no auth,
+  loopback only). `version`/`revision` are baked at image build time from the release workflow's `VERSION`/`REVISION` build-args (§14.3); local `cargo run` builds report `dev` + the working-tree sha (P0 fixes the exact fallback strings; the doc-constants test asserts the fields exist, never their values). `index` is the score-index version. Counts are current pool member counts; `jev=degraded` when all three `jev:<source>` keys are cooling, else `ok`. Deploy/upgrade scripts assert `version`/`revision` after every `pull` + `up -d` (§11).
 
 ### 9.2 Admin (loopback + `JEVR_API_KEY`)
 
@@ -565,7 +565,7 @@ Warslop consumption (its change, for the integration phase): `JEVR_BASE_URL` + `
 ## 10. Build plan (phases, each ends usable and green)
 
 **P0 — Scaffold + first snapshots (2–4 focused sessions).**
-Repo skeleton (cargo, `cargo test`, `clippy -D warnings`, `fmt --check`, `deny.toml` + `cargo deny check`, `cargo audit --deny warnings`, `rust-toolchain.toml` (stable + `clippy,rustfmt` + `x86_64-unknown-linux-musl`), `.github/workflows/ci.yml` (PR fast jobs per §14) + `.github/workflows/release.yml` (GHCR per §14) + `.github/dependabot.yml` (cargo/docker/github-actions weekly), Dockerfile multi-stage (`rust:bookworm` builder + `musl-tools`, `rustup target add x86_64-unknown-linux-musl`, `cargo auditable build --locked --release --target x86_64-unknown-linux-musl`, `strip`, runtime `gcr.io/distroless/static-debian13:nonroot` digest-pinned) + `compose.yaml` service `jev-router` with `network_mode: host`, `env_file: ~/.config/jev-router/env`, `./data:/app/data`, `restart: unless-stopped`, healthcheck on `/healthz`, `env.example` without secrets, port-4098 conflict check, `src/go_catalog.rs` stub with source-date), SQLite schema + migrations (WAL, `busy_timeout`, 0600),
+Repo skeleton (cargo, `cargo test`, `clippy -D warnings`, `fmt --check`, `deny.toml` + `cargo deny check`, `cargo audit --deny warnings`, `rust-toolchain.toml` (stable + `clippy,rustfmt` + `x86_64-unknown-linux-musl`), `.github/workflows/ci.yml` (PR fast jobs per §14) + `.github/workflows/release.yml` (GHCR build+push per §14.3) + `.github/workflows/cleanup.yml` (weekly GHCR retention per §14.3) + `.github/dependabot.yml` (cargo/docker/github-actions weekly), Dockerfile multi-stage (`rust:bookworm` builder + `musl-tools`, `rustup target add x86_64-unknown-linux-musl`, `cargo auditable build --locked --release --target x86_64-unknown-linux-musl`, `strip`, `ARG VERSION/REVISION` baked into the binary and reported by `/healthz` (§9.1), runtime `gcr.io/distroless/static-debian13:nonroot` digest-pinned) + `compose.yaml` service `jev-router` with `image: ghcr.io/bedasrv/jev-router:<pin>` (literal tag, no `build:` on the deploy host — CI is the only publisher), `pull_policy: always`, `network_mode: host`, `env_file: ~/.config/jev-router/env`, `./data:/app/data`, `restart: unless-stopped`, healthcheck on `/healthz`, `env.example` without secrets, port-4098 conflict check, `src/go_catalog.rs` stub with source-date), SQLite schema + migrations (WAL, `busy_timeout`, 0600),
 `fetch` pipeline with the budget/flock-lock/429/`rate_limit_state` rules, snapshots for `openrouter_models`, `openrouter_benchmarks`, `aa_language_free` (the `:free` cap check is not a snapshot). Done when:
 `jev-router fetch` stores the three snapshot sources within budget; a fake-server test suite counts requests and
 proves reserve-before-call, single-flight (flock, no long DB transaction), 429 pause, and hash-conditional storage. No request path exists
@@ -598,7 +598,7 @@ pool lands on the free pool; a streamed answer reaches the client with correct h
 
 **P5 — Warslop integration readiness (their F100 repoint).**
 Docs + dry-run: a local fake of Warslop's client calling `free`/`paid` under load with a small script (incl. `:free` 20/min burst + paid→free spill);
-`JEVR_*` lines for dev-secrets; a one-page integration note (contract version = spec date + `index_version` in `x-jev-index`; Warslop privacy text must disclose any-country/training for jev-router pools per D28). Done when: the contract in §9 is frozen,
+`JEVR_*` lines for dev-secrets; a one-page integration note (contract version = spec date + image `version`/`revision` in `/healthz` + `index_version` in `x-jev-index`; Warslop privacy text must disclose any-country/training for jev-router pools per D28); a GHCR deploy drill on the target host (`pull` a pinned digest + `up -d`, assert `/healthz` `version`/`revision`, roll back to the previous semver tag per §11). Done when: the contract in §9 is frozen,
 versioned and announced; a Warslop dev stack can point at jev-router without code changes on this side.
 
 **P6 (parked) — Cache-aware economics.**
@@ -611,6 +611,7 @@ sends the header and the decision log shows real switch churn.
 ## 11. Ops runbook
 
 - Service: `docker compose {up -d,restart,logs -f} jev-router` · logs `docker logs -f jev-router`. DB is WAL + `busy_timeout=5000` on the `./data` volume; the ops loop runs inside the container and the CLI runs via `docker exec jev-router jev-router …` so both share the same flock + short `BEGIN IMMEDIATE` transactions — nothing else may write the DB file from the host while the container runs.
+- Deploy/upgrade (GHCR image per §14.3; CI is the only publisher — never `docker compose build` on the deploy host): one-time `echo "$CR_PAT" | docker login ghcr.io -u <user> --password-stdin` (PAT classic with `read:packages`, stored 0600 off-repo; the package stays private until the owner explicitly makes it public). Upgrade: set the new literal tag in `compose.yaml`, then `docker compose pull jev-router && docker compose up -d jev-router`; assert `/healthz` `version`/`revision` equal the deployed tag/digest and `docker inspect` digest equals the release run's published digest; record tag+digest in the deploy log. Rollback is the same two commands with the previous tag+digest (§14.3 retention keeps every semver tag pullable). Prod pins a semver tag or `sha-<short>`; `latest`/`edge` track `master` and are dev-only.
 - Fetch/index/sync run inside the container's ops loop (hourly listing check, daily pass with jitter) and
   via `docker exec` by hand; `index add/build/show/diff` never fetch (network-offline) but still take the DB locks.
 - Rotating a key: update `~/.config/jev-router/env` (+ dev-secrets where duplicated) and `docker compose up -d`. Nightly: delete `routing_decisions` > 90 days, sweep expired `conversation_pins`, `VACUUM` weekly; backup is `docker exec jev-router sqlite3 /app/data/jev-router.db ".backup '/app/data/jev-router-$(date +%F).bak'"` (never raw `.db`/`-wal` copy under write load).
@@ -655,7 +656,7 @@ sends the header and the decision log shows real switch churn.
    usage — with no prompt text stored.
 5. The Go subscription is not drained: the ledger and headroom rules appear in `/admin/pools`, and
    refusals fall back cleanly.
-6. `bash scripts/verify.sh` equivalent for this repo: §14 CI green on the PR (`fmt`, `check`, `clippy -D warnings`, `doc -D warnings`, `test` incl. `axum-test` + `wiremock`/`httpmock` fakes + spec-constants pin + `proptest`, `llvm-cov --fail-under-lines 70` non-blocking upload, `cargo machete`, `deny check bans licenses sources`, `cargo tree --duplicates`), release via `cargo auditable build` (verify with `cargo audit bin`), image ≤ 25MB compressed (CI size gate; `cargo bloat` informational only), container survives
+6. `bash scripts/verify.sh` equivalent for this repo: §14 CI green on the PR (`fmt`, `check`, `clippy -D warnings`, `doc -D warnings`, `test` incl. `axum-test` + `wiremock`/`httpmock` fakes + spec-constants pin + `proptest`, `llvm-cov --fail-under-lines 70` non-blocking upload, `cargo machete`, `deny check bans licenses sources`, `cargo tree --duplicates`, `docker-build-check`), release publishes `ghcr.io/bedasrv/jev-router` per §14.3 (semver tags on `v*`, `edge` + `sha-*` on `master`; `cargo auditable build` inside the image, verifiable with `cargo audit bin`), image ≤ 25MB compressed (the release fails otherwise — `scripts/check-image-size.sh`; `cargo bloat` informational only), the deployed `/healthz` reports the released `version`/`revision`, `pull` + `up -d` upgrades and the kept previous semver tag rolls back (§11), container survives
    a `docker kill -s 9` (`restart: unless-stopped`), and the spec's tables match the code's constants (a doc-constants test pins §9.4 defaults, §5.4 thresholds, §6.3 prices source-date).
 7. Jev failover: with oc-free failing, the turn still routes via oc-paid; with both down, via OpenRouter;
    with every Jev source down, the turn still completes on the task default (fail-open). With
@@ -663,7 +664,7 @@ sends the header and the decision log shows real switch churn.
 
 ---
 
-## 14. CI (GitHub Actions — researched 2026-10-13)
+## 14. CI + GHCR (GitHub Actions — CI researched 2026-10-13; GHCR deployment + versioning re-pinned live 2026-10-13)
 
 No official `rust-lang/setup-rust` exists (infra-team issue #256 still a proposal) — standard is `dtolnay/rust-toolchain` + `Swatinem/rust-cache@v2`. `Cargo.lock` is committed (binary); every `cargo` invocation passes `--locked`.
 
@@ -678,16 +679,73 @@ No official `rust-lang/setup-rust` exists (infra-team issue #256 still a proposa
 5. `test`: `cargo test --workspace --all-features --locked` — own routes via `axum-test TestServer`, upstreams via `wiremock` (tokio-only) or `httpmock` (delay/fault/standalone, fresher in 2026); fault-injection (`500` → fallback, delay → timeout → fallback, 500-then-200 → retry) + spec-constants pin test (§9.4 defaults, §5.4 thresholds, §6.3 `source_date` — fail on silent drift) + `proptest` (3–5 properties on scorer/matcher: monotonicity, bounds, determinism). `nextest` only if suite time/flakiness justifies it (doctests still need `cargo test --doc`).
 6. `coverage`: `cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --fail-under-lines 70` (tarpaulin loses on musl; branch coverage needs nightly — line gate only; raise to 80 only after sustained headroom). Upload via `codecov/codecov-action@v5` with `fail_ci_if_error: false` (outage ≠ red).
 7. `deps`: `cargo machete` (fast unused-dep fail) + `cargo deny check bans licenses sources` + `cargo tree --duplicates --target all` (diagnosis; or `multiple-versions = deny` in `deny.toml`). `cargo bloat --release --crates` informational only, never a gate. `cargo +nightly udeps` weekly audit only.
+8. `docker-build-check`: `docker/build-push-action` with `push: false` building the real Dockerfile on every PR — validates what the release workflow will publish without publishing anything (attestations need `push: true`, so none are generated here). The release workflow (§14.3) is the only publisher; PRs never push.
 
-Branch protection requires `fmt`, `clippy`, `test`, `deny-bans` + up-to-date branches. Advisory-feed jobs never block PRs.
+Branch protection requires `fmt`, `clippy`, `test`, `deny-bans`, `docker-build-check` + up-to-date branches. Advisory-feed jobs never block PRs.
 
 ### 14.2 Supply chain (scheduled, not PR-blocking)
 
 `deny check bans licenses sources` runs on PRs (deterministic). Advisories run two ways because `deny advisories` and `cargo audit` query the same RustSec DB: daily `rustsec/audit-check@v2` cron (files issues) and/or `deny advisories` matrix with `continue-on-error` — a newly disclosed RUSTSEC must not red-flag every open PR. Note 2026-04-03 `krates` soundness bug (renamed `[lib] name` dropped subtrees, fixed 0.21.0): run both `audit` + `deny advisories` until the pinned deny is past the fix.
 
-### 14.3 Release workflow (`.github/workflows/release.yml`, `main`/tags only)
+### 14.3 GHCR deployment + versioning (`.github/workflows/release.yml` + `cleanup.yml` + `compose.yaml`)
 
-`permissions: {contents: read, packages: write}`. `docker/setup-buildx-action@v4` → `docker/login-action@v4` (`ghcr.io`, `github.actor`, `GITHUB_TOKEN`) → `docker/metadata-action@v6` (tags `sha` + `latest` on default branch + `ref` on tag) → `docker/build-push-action@v7` (`push: true`, `cache-from/type=gha`, `cache-to/type=gha,mode=max`, `provenance: mode=max` default, `sbom: true`). Registry cache (`type=registry`) is rejected for billed storage — GHA cache only; keep only `latest` + `sha-*`, delete untagged. Musl build stays inside the Dockerfile (no QEMU/cross in GHA until `arm64` is actually needed). Size gate step after push fails over 25MB. `cosign`/attestations skipped until third-party distribution (default GH provenance + pinned base digests + Dependabot suffice).
+Image: `ghcr.io/bedasrv/jev-router` (lowercase — the metadata-action sanitization rule lowercases image names, README verified 2026-10-13). The first `push` creates the package **private** (this repo 404s anonymously, checked 2026-10-13 — it is private); it stays private until the owner explicitly flips it public. The package links to the repo automatically via the OCI `org.opencontainers.image.source` label that `metadata-action` emits — keep the default `labels`/`annotations` outputs wired so inheritance and the package page keep working (GHCR container-registry + access-control docs, verified 2026-10-13).
+
+#### Versioning policy (git tags drive GHCR tags; default branch is `master`)
+
+- Releases are git tags `vX.Y.Z` (semver, leading `v`). Pre-releases (e.g. `v2.0.8-beta.67`) publish only their full `{{version}}` — they never move `{{major}}.{{minor}}` / `{{major}}` / `latest` (metadata-action rule, README verified 2026-10-13). While the major version is `0`, the bare `{{major}}` (`0`) tag is suppressed (major-version-zero rule, same source).
+- `metadata-action` config (exact):
+  ```yaml
+  images: ghcr.io/bedasrv/jev-router
+  flavor: latest=auto
+  tags: |
+    type=edge,branch=master
+    type=sha,prefix=sha-,format=short
+    type=semver,pattern={{version}}
+    type=semver,pattern={{major}}.{{minor}}
+    type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+    type=raw,value=latest,enable={{is_default_branch}}
+  ```
+  Intent: a `master` push publishes `edge` + `sha-<short>` (+ `latest`); a `v1.2.3` push publishes `1.2.3`, `1.2`, `1` (+ `latest` via `flavor: latest=auto` on semver types) + `sha-<short>` — except the bare `{{major}}` is suppressed while 0.x by the guard above. Tag priority (schedule 1000 > semver 900 > edge 700 > ref 600 > raw 200 > sha 100) makes the full semver the OCI `version` label on releases (README-verified defaults, same source). The exact per-event tag sets are asserted by a P0 dry-run (`push: false`) before the first real publish — the config above is frozen, the CI log is truth.
+- The image bakes `VERSION` (= the meta step's `version` output) and `REVISION` (= `github.sha`) as Docker build-args into the binary (`ARG VERSION=dev` / `ARG REVISION=unknown` defaults for local builds); `/healthz` reports both (§9.1). The release run's `digest` output is the rollback handle (§11). Prod `compose.yaml` pins a semver tag or `sha-<short>`; `latest`/`edge` track `master` and are dev-only.
+
+#### Release workflow (`master` pushes, `v*` tags, manual dispatch only — never PRs)
+
+Triggers: `push` to `master` + `push` tags `v*` + `workflow_dispatch` (rebuilds only). No `concurrency.cancel-in-progress` (per §14.1 rule). `permissions: {contents: read, packages: write}` — the container-registry docs' `GITHUB_TOKEN` publish path (verified 2026-10-13); no `id-token`/`attestations` permissions are needed for the provenance+SBOM below (they are `build-push-action` inputs, not `actions/attest`).
+
+Steps (every pin is the `latest` release on its repo, verified live 2026-10-13; P0 resolves each to its commit SHA per §14.5):
+
+1. `actions/checkout@v7.0.1`.
+2. `docker/setup-buildx-action@v4.4.1` (default `docker-container` driver; also satisfies the GHA-cache backend floor of Buildx ≥ 0.21 — Docker cache docs verified 2026-10-13; GitHub-hosted `ubuntu-latest` runners already carry current Buildx/BuildKit per the same page, so no `version: latest` pin is needed).
+3. `docker/login-action@v4.6.0`: `registry: ghcr.io`, `username: ${{ github.actor }}`, `password: ${{ secrets.GITHUB_TOKEN }}`.
+4. `docker/metadata-action@v6.2.0`: `images:` + `tags:` + `flavor:` per above; forward `labels` and `annotations` (default annotation level `manifest` is correct for GHCR — only set `DOCKER_METADATA_ANNOTATIONS_LEVELS` if GHCR stops reading manifest-level annotations, never pre-emptively).
+5. `docker/build-push-action@v7.4.0`: `context: .`, `push: true`, `tags`/`labels`/`annotations` from the meta step, `build-args: VERSION=${{ steps.meta.outputs.version }} REVISION=${{ github.sha }}`, `provenance: mode=max` (explicit: this repo is private so the default would be `mode=min`; max is the documented recommendation — Docker attestations docs verified 2026-10-13), `sbom: true` (not automatic — must be set, same source), `cache-from: type=gha`, `cache-to: type=gha,mode=max` (add `,ignore-error=true` only if cache-export flakiness ever red-flags a release; default off — the read-only-cache caveat for untrusted triggers does not apply here since this workflow never runs on PRs; Docker cache docs, same source). `type=registry` cache stays rejected (billed storage). `platforms: linux/amd64` only; no QEMU/cross until `arm64` is actually needed. The musl build stays inside the Dockerfile (existing rule). Never pass secrets as build-args — provenance embeds build-arg values (Docker docs warning, same source); this build needs none.
+6. Size gate (fails the release over 25 MB compressed): `scripts/check-image-size.sh <tag>` (P0 writes it) against `docker buildx imagetools inspect ghcr.io/bedasrv/jev-router:<tag>`; `cargo bloat` stays informational (existing rule).
+7. Digest record: the workflow logs `steps.build.outputs.digest`; the deploy log pins `ghcr.io/bedasrv/jev-router:<tag>@<digest>` for rollback (§11).
+
+`cosign` stays out until third-party distribution (existing rule, kept): default GH provenance (`mode=max`) + `sbom: true` + digest-pinned bases + Dependabot suffice. When signing is enabled, the tool is `sigstore/cosign v3.1.3` (latest 2026-10-13, incl. the GHSA-fx35-mq7g-6g98 verification-bypass fix) — re-pin then, never today.
+
+#### Retention (`.github/workflows/cleanup.yml`, weekly schedule)
+
+Keep every tagged version (`1.2.3` / `1.2` / `1` / `latest` / `edge` / `sha-*`) — at ~25 MB/image the storage is negligible next to the automation risk of deleting a rollback target. Delete only untagged versions (detached manifests/attestation leftovers), keeping the 10 most recent. Weekly `schedule: cron` job with `actions/delete-package-versions@v5.0.0` (latest 2026-10-13; inputs README-verified — `package-type: container` is the v5 value, `docker` is v4-or-older only; at most 100 versions per run per the same README):
+- Job: `package-name: jev-router`, `package-type: container`, `delete-only-untagged-versions: "true"`, `min-versions-to-keep: 10`.
+- No pass touches tagged versions: semver tags are never auto-deleted. If the tagged count ever becomes a storage problem, add an explicit second pass then — never freeze an `ignore-versions` regex today for a problem that does not exist.
+- One-time setup after the first push: package Settings → Manage Actions Access → grant `bedasrv/jev-router` Admin so the workflow can delete (per the action README's access note, verified 2026-10-13); otherwise run with a PAT classic (`delete:packages` + `read:packages`) stored as `CLEANUP_PAT`.
+
+#### Deploy host (`compose.yaml`)
+
+```yaml
+services:
+  jev-router:
+    image: ghcr.io/bedasrv/jev-router:0.3.1   # literal pin per release; prod never tracks latest/edge
+    pull_policy: always
+    network_mode: host
+    env_file: ~/.config/jev-router/env
+    volumes: [./data:/app/data]
+    restart: unless-stopped
+```
+
+The tag is a literal (P0; example shows the shape, not a real release — no release exists yet). No `build:` block on the deploy host. Upgrade/rollback/healthcheck per §11; the P5 deploy drill proves the loop before Warslop repoints.
 
 ### 14.4 Git hygiene (enforced)
 
