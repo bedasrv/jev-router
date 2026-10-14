@@ -17,10 +17,8 @@ export function alternate(ids, facts, lastDomain = null) {
   return out;
 }
 
-export function buildList({ pool, policy, facts, req, preferred = null, now = Date.now() }) {
+export function eligibleIds({ pool, policy, facts, req }) {
   const deny = new Set(policy.denylist ?? []);
-  const lim = policy.limits ?? {};
-  const maxMain = (pool === "free" ? lim.max_main_free : null) ?? lim.max_main ?? 3, maxSpill = lim.max_spill ?? 2;
   const excluded = [];
   const pick = (ids) => ids.filter((id) => {
     if (deny.has(id)) { excluded.push({ id, reason: "denylist" }); return false; }
@@ -30,6 +28,14 @@ export function buildList({ pool, policy, facts, req, preferred = null, now = Da
   });
   const main = pick(policy.order[pool]);
   const spill = pool === "paid" ? pick(policy.order.free).filter((id) => !main.includes(id)) : [];
+  return { main, spill, excluded };
+}
+
+export function buildList({ pool, policy, facts, req, preferred = null, now = Date.now() }) {
+  const deny = new Set(policy.denylist ?? []);
+  const lim = policy.limits ?? {};
+  const maxMain = (pool === "free" ? lim.max_main_free : null) ?? lim.max_main ?? 3, maxSpill = lim.max_spill ?? 2;
+  const { main, spill, excluded } = eligibleIds({ pool, policy, facts, req });
   if (preferred && main.includes(preferred)) main.splice(0, main.length, preferred, ...main.filter((x) => x !== preferred));
 
   let models;

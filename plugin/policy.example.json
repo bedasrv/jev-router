@@ -59,115 +59,167 @@
  "models": {
   "ocpaid/opencode-go/deepseek-v4.1-flash": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "budget price; fast; strong at code and tool use"
   },
   "ocpaid/opencode-go/glm-5.3": {
    "tools": true,
-   "vision": false
+   "vision": false,
+   "traits": "mid price; strong general and coding model; no image input"
   },
   "ocpaid/opencode-go/kimi-k3": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "mid price; strong at agentic coding and long tool chains"
   },
   "ocpaid/opencode-go/deepseek-v4-pro": {
    "tools": true,
-   "vision": false
+   "vision": false,
+   "traits": "mid price; strong reasoning and code; slower; no image input"
   },
   "ocpaid/opencode-go/qwen3.8-flash": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "budget price; fast; good general model"
   },
   "ocpaid/opencode-go/gpt-6-luna": {
    "tools": true,
    "vision": true,
-   "context_length": 1050000
+   "context_length": 1050000,
+   "traits": "premium price; strong all-round reasoning and writing"
   },
   "ocpaid/opencode-go/grok-4.7": {
    "tools": true,
    "vision": true,
-   "context_length": 500000
+   "context_length": 500000,
+   "traits": "mid price; strong general reasoning; fast"
   },
   "ocpaid/opencode-go/kimi-k2.7-code": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "mid price; specialised for code editing and tool use"
   },
   "ocpaid/opencode-go/qwen3.8-max": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "premium price; deep reasoning; strongest of its family"
   },
   "ocpaid/opencode-go/glm-5.3-flash": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "budget price; fast; light general model"
   },
   "ocpaid/opencode-go/grok-4.6": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "mid price; solid general model"
   },
   "ocpaid/opencode-go/gpt-5.6-luna": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "premium price; strong reasoning"
   },
   "ocpaid/opencode-go/glm-5.2": {
    "tools": true,
-   "vision": false
+   "vision": false,
+   "traits": "budget price; older general and coding model; no image input"
   },
   "ocpaid/opencode-go/kimi-k2.6": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "budget price; capable coding model"
   },
   "ocpaid/opencode-go/deepseek-v4-flash": {
    "tools": true,
-   "vision": false
+   "vision": false,
+   "traits": "budget price; fast; simple tasks; no image input"
   },
   "ocpaid/opencode-go/minimax-m3": {
    "tools": true,
-   "vision": null
+   "vision": null,
+   "traits": "budget price; agentic tool use; verbose reasoning"
   },
   "ocpaid/opencode-go/longcat-2.5-preview-free": {
    "tools": true,
    "vision": true,
-   "context_length": 1000000
+   "context_length": 1000000,
+   "traits": "free preview; light general model"
   },
   "ocpaid/opencode-go/cat-jam-free": {
    "tools": null,
    "vision": null,
-   "context_length": 262144
+   "context_length": 262144,
+   "traits": "free preview; light model"
   },
   "ocfree/opencode/space-bunny-free": {
    "tools": true,
-   "vision": null
+   "vision": null,
+   "traits": "free; roomy context; general model"
   },
   "ocfree/opencode/muse-spark-1.3-contributor-free": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "free; general model"
   },
   "ocfree/opencode/ling-3.1-flash-free": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "free; fast; light model"
   },
   "ocfree/opencode/nemotron-3.5-lightning-free": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "free; fast; light model"
   },
   "ocfree/opencode/mimo-v2.6-flash-free": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "free; fast; light model"
   },
   "ocfree/opencode/muse-spark-1.2-contributor-free": {
    "tools": true,
-   "vision": true
+   "vision": true,
+   "traits": "free; general model; older"
   },
   "ocfree/opencode/cat-jam-free": {
    "tools": null,
-   "vision": null
+   "vision": null,
+   "traits": "free preview; light model"
   },
   "mscopilot/default": {
    "tools": null,
-   "vision": null
+   "vision": null,
+   "traits": "last resort general model"
   }
  },
  "last_resort": {
   "free": "mscopilot/default",
   "paid": "mscopilot/default"
+ },
+ "jev": {
+  "mode": "shadow",
+  "threshold": 0.5,
+  "deadline_ms": 3000,
+  "source_timeout_ms": 1200,
+  "max_shown": {
+   "paid": 12,
+   "free": 8
+  },
+  "sample_file": "shadow-samples.jsonl",
+  "sample_chars": 300,
+  "sources": [
+   {
+    "name": "ocfree",
+    "url": "http://OCFREE_HOST:4097/v1/systemone",
+    "model": "jev-1.13-free"
+   },
+   {
+    "name": "ocpaid",
+    "url": "http://127.0.0.1:4097/v1/systemone",
+    "model": "jev-1.13-free",
+    "key_file": "/path/to/oc-paid-proxy.env",
+    "key_var": "PROXY_API_KEY"
+   }
+  ]
  }
 }
