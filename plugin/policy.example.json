@@ -10,7 +10,7 @@
   {
    "prefix": "ocpaid",
    "list_url": "http://127.0.0.1:4097/v1/models",
-   "key_file": "/home/user/.config/opencode/oc-paid-proxy.env",
+   "key_file": "/path/to/oc-paid-proxy.env",
    "key_var": "PROXY_API_KEY"
   },
   {

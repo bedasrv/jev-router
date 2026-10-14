@@ -21,7 +21,7 @@ services:
       - ./data:/app/data
       - ./plugins:/app/plugins                        # = a checkout/copy of this repo's plugin/ dir as ./plugins/jev-router (policy.json hot-reloads)
       # listing-source key for policy.json (key_file/key_var), read-only; the plugin cannot see container env vars
-      - /home/user/.config/opencode/oc-paid-proxy.env:/home/user/.config/opencode/oc-paid-proxy.env:ro
+      - /path/to/oc-paid-proxy.env:/path/to/oc-paid-proxy.env:ro   # same path as policy.json key_file
     mem_limit: 6g
     healthcheck:
       test: ["CMD", "node", "healthcheck.mjs"]
