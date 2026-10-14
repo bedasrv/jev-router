@@ -12,8 +12,17 @@ export function conversationKey(headers, body) {
   return "h:" + hash(t(sys) + "\u0000" + t(first));
 }
 
-// Fresh task = the last message is a user message (not a tool result).
-export const isFresh = (body) => (body?.messages ?? []).at(-1)?.role === "user";
+// Fresh task = no tool result is waiting for the model's reply. Some clients (opencode) append a
+// synthetic trailing user message after the tool result, so "last message is user" is not enough:
+// look at what follows the last assistant message instead.
+export function isFresh(body) {
+  const msgs = body?.messages ?? [];
+  let i = msgs.length - 1;
+  while (i >= 0 && msgs[i]?.role !== "assistant") i--;
+  const tail = msgs.slice(i + 1);
+  if (tail.some((m) => m?.role === "tool" || m?.role === "function")) return false;
+  return msgs.at(-1)?.role === "user";
+}
 
 export function createSessions(ttlMs = 3600000, max = 5000) {
   const m = new Map();

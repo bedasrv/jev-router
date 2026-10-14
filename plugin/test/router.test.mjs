@@ -118,3 +118,12 @@ test("an id missing from a loaded listing is excluded as not_listed", async () =
   const out = await r.onRoute(user("hi"));
   assert.ok(!out.models.includes("a/p1"));
 });
+test("isFresh: tool result followed by a synthetic user message is a continuation", async () => {
+  const { isFresh } = await import("../lib/sessions.mjs");
+  const u = (c) => ({ role: "user", content: c }), a = { role: "assistant", content: "", tool_calls: [{}] }, tl = { role: "tool", content: "ok" };
+  assert.equal(isFresh({ messages: [u("go")] }), true);
+  assert.equal(isFresh({ messages: [u("go"), a, tl] }), false);
+  assert.equal(isFresh({ messages: [u("go"), a, tl, u("reminder")] }), false);
+  assert.equal(isFresh({ messages: [u("go"), a, tl, { role: "assistant", content: "done" }, u("next"), u("extra")] }), true);
+  assert.equal(isFresh({ messages: [] }), false);
+});
