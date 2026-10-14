@@ -123,7 +123,9 @@ jobs:
           labels: |
             org.opencontainers.image.version=${{ steps.ver.outputs.image_tag }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=https://github.com/diegosouzapw/OmniRoute
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=OmniRoute ${{ steps.ver.outputs.tag }} + jev-router onRoute patch
+            org.opencontainers.image.licenses=MIT
           provenance: mode=max
           sbom: true
           push: true

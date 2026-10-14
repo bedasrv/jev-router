@@ -29,7 +29,7 @@ COMMON=(--platform linux/amd64 --target runner-web
         --build-arg OMNIROUTE_USE_TURBOPACK=0 --build-arg "OMNIROUTE_BUILD_MEMORY_MB=${BUILD_MEMORY_MB:-12288}"
         --label "org.opencontainers.image.revision=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
         --label "org.opencontainers.image.version=$VER-jev$REV"
-        --label "org.opencontainers.image.source=https://github.com/diegosouzapw/OmniRoute")
+        --label "org.opencontainers.image.source=${SOURCE_URL:-https://github.com/bedasrv/jev-router}")
 if [ "$MODE" = "--push" ]; then
   docker buildx build "${COMMON[@]}" "${TAGS[@]}" --provenance=mode=max --sbom=true --push "$WORK/upstream"
 else
