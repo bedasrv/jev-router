@@ -2,7 +2,9 @@
 // to demote them. Cooling members are DEMOTED (moved to the end of the list), never removed, so the last
 // resort stays reachable and a recovered member is found again after its cooldown.
 
-const DEFAULTS = { base_ms: 30000, auth_base_ms: 60000, max_ms: 600000, domain_window_ms: 60000, omni_skip_ms: 30000 };
+// auth-like failures (a gated/expired free tier, billing) do not clear in minutes, and each re-probe costs a real request
+// (seen: 7-8 s for a 403), so they back off to 30 min; transient errors cap at 10 min.
+const DEFAULTS = { base_ms: 30000, auth_base_ms: 60000, max_ms: 600000, auth_max_ms: 1800000, domain_window_ms: 60000, omni_skip_ms: 30000 };
 
 // Statuses that say something about the model/connection. Other 4xx (400, 404, 413, 422 ...) are about
 // the request (e.g. "Image too small", context too long, bad parameter) and must not punish the model.
@@ -16,7 +18,7 @@ export function createHealth({ now = Date.now, cfg = {}, log = () => {}, prev = 
   const models = prev?._models ?? new Map(); // id -> {fails, until, status, kind}
   const domains = prev?._domains ?? new Map(); // prefix -> {until, status, recent: Map<id, ts>}
 
-  const dur = (fails, status) => Math.min(c.max_ms, (AUTHLIKE.has(status) ? c.auth_base_ms : c.base_ms) * 2 ** Math.max(0, fails - 1));
+  const dur = (fails, status) => (AUTHLIKE.has(status) ? Math.min(c.auth_max_ms, c.auth_base_ms * 2 ** Math.max(0, fails - 1)) : Math.min(c.max_ms, c.base_ms * 2 ** Math.max(0, fails - 1)));
 
   function fail(a) {
     const t = now();

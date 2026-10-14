@@ -96,3 +96,11 @@ test("router: onRouteResult never throws on junk; Jev menu skips cooling candida
   await new Promise((res) => setTimeout(res, 20));
   assert.deepEqual(seen, [3, 2]); // a/p1 is cooling, so Jev is offered two candidates
 });
+
+test("repeated auth failures back off to 30 minutes, transient ones cap at 10", () => {
+  const now = clock(), h = createHealth({ now });
+  for (let i = 0; i < 8; i++) { h.record({ attempts: [att("a/auth", false, 403, "auth"), att("b/prov", false, 502, "provider")] }); now.adv(1); }
+  const snap = h.snapshot();
+  assert.ok(snap["a/auth"].secs > 600 && snap["a/auth"].secs <= 1800, `auth secs ${snap["a/auth"].secs}`);
+  assert.ok(snap["b/prov"].secs <= 600, `provider secs ${snap["b/prov"].secs}`);
+});
