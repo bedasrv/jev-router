@@ -9,40 +9,52 @@
  },
  "sources": [
   {
-   "prefix": "ocpaid",
+   "prefix": "ocfree",
+   "list_url": "http://OCFREE_HOST:4097/v1/models"
+  },
+  {
+   "prefix": "ocgoa",
    "list_url": "http://127.0.0.1:4097/v1/models",
    "key_file": "/path/to/oc-paid-proxy.env",
    "key_var": "PROXY_API_KEY"
   },
   {
-   "prefix": "ocfree",
-   "list_url": "http://OCFREE_HOST:4097/v1/models"
+   "prefix": "ocgob",
+   "list_url": "http://127.0.0.1:4097/v1/models",
+   "key_file": "/path/to/oc-paid-proxy.env",
+   "key_var": "PROXY_API_KEY"
+  },
+  {
+   "prefix": "ocpv",
+   "list_url": "http://127.0.0.1:4097/v1/models",
+   "key_file": "/path/to/oc-paid-proxy.env",
+   "key_var": "PROXY_API_KEY"
   }
  ],
  "order": {
   "paid": [
-   "ocpaid/opencode-go/deepseek-v4.1-flash",
-   "ocpaid/opencode-go/glm-5.3",
-   "ocpaid/opencode-go/kimi-k3",
-   "ocpaid/opencode-go/deepseek-v4-pro",
-   "ocpaid/opencode-go/qwen3.8-flash",
-   "ocpaid/opencode-go/gpt-6-luna",
-   "ocpaid/opencode-go/grok-4.7",
-   "ocpaid/opencode-go/kimi-k2.7-code",
-   "ocpaid/opencode-go/qwen3.8-max",
-   "ocpaid/opencode-go/glm-5.3-flash",
-   "ocpaid/opencode-go/grok-4.6",
-   "ocpaid/opencode-go/gpt-5.6-luna",
-   "ocpaid/opencode-go/glm-5.2",
-   "ocpaid/opencode-go/kimi-k2.6",
-   "ocpaid/opencode-go/deepseek-v4-flash",
-   "ocpaid/opencode-go/minimax-m3",
-   "ocpaid/opencode-go/longcat-2.5-preview-free",
-   "ocpaid/opencode-go/cat-jam-free"
+   "ocgoa/opencode-go/deepseek-v4.1-flash",
+   "ocgob/opencode-go/glm-5.3",
+   "ocgoa/opencode-go/kimi-k3",
+   "ocgob/opencode-go/deepseek-v4-pro",
+   "ocgoa/opencode-go/qwen3.8-flash",
+   "ocgob/opencode-go/gpt-6-luna",
+   "ocgoa/opencode-go/grok-4.7",
+   "ocgob/opencode-go/kimi-k2.7-code",
+   "ocgoa/opencode-go/qwen3.8-max",
+   "ocgob/opencode-go/glm-5.3-flash",
+   "ocgoa/opencode-go/grok-4.6",
+   "ocgob/opencode-go/gpt-5.6-luna",
+   "ocgoa/opencode-go/glm-5.2",
+   "ocgob/opencode-go/kimi-k2.6",
+   "ocgoa/opencode-go/deepseek-v4-flash",
+   "ocgob/opencode-go/minimax-m3",
+   "ocpv/opencode-go/longcat-2.5-preview-free",
+   "ocpv/opencode-go/cat-jam-free"
   ],
   "free": [
    "ocfree/opencode/space-bunny-free",
-   "ocpaid/opencode-go/longcat-2.5-preview-free",
+   "ocpv/opencode-go/longcat-2.5-preview-free",
    "ocfree/opencode/muse-spark-1.3-contributor-free",
    "ocfree/opencode/ling-3.1-flash-free",
    "ocfree/opencode/nemotron-3.5-lightning-free",
@@ -52,100 +64,106 @@
   ]
  },
  "denylist": [
-  "ocpaid/opencode-go/step-5-preview-free",
-  "ocpaid/opencode-go/claude-haiku-5-5",
-  "ocpaid/opencode-go/minimax-m2.7"
+  "ocgoa/opencode-go/step-5-preview-free",
+  "ocgob/opencode-go/step-5-preview-free",
+  "ocpv/opencode-go/step-5-preview-free",
+  "ocgoa/opencode-go/claude-haiku-5-5",
+  "ocgob/opencode-go/claude-haiku-5-5",
+  "ocpv/opencode-go/claude-haiku-5-5",
+  "ocgoa/opencode-go/minimax-m2.7",
+  "ocgob/opencode-go/minimax-m2.7",
+  "ocpv/opencode-go/minimax-m2.7"
  ],
  "models": {
-  "ocpaid/opencode-go/deepseek-v4.1-flash": {
+  "ocgoa/opencode-go/deepseek-v4.1-flash": {
    "tools": true,
    "vision": true,
    "traits": "budget price; fast; strong at code and tool use"
   },
-  "ocpaid/opencode-go/glm-5.3": {
+  "ocgob/opencode-go/glm-5.3": {
    "tools": true,
    "vision": false,
    "traits": "mid price; strong general and coding model; no image input"
   },
-  "ocpaid/opencode-go/kimi-k3": {
+  "ocgoa/opencode-go/kimi-k3": {
    "tools": true,
    "vision": true,
    "traits": "mid price; strong at agentic coding and long tool chains"
   },
-  "ocpaid/opencode-go/deepseek-v4-pro": {
+  "ocgob/opencode-go/deepseek-v4-pro": {
    "tools": true,
    "vision": false,
    "traits": "mid price; strong reasoning and code; slower; no image input"
   },
-  "ocpaid/opencode-go/qwen3.8-flash": {
+  "ocgoa/opencode-go/qwen3.8-flash": {
    "tools": true,
    "vision": true,
    "traits": "budget price; fast; good general model"
   },
-  "ocpaid/opencode-go/gpt-6-luna": {
+  "ocgob/opencode-go/gpt-6-luna": {
    "tools": true,
    "vision": true,
    "context_length": 1050000,
    "traits": "premium price; strong all-round reasoning and writing"
   },
-  "ocpaid/opencode-go/grok-4.7": {
+  "ocgoa/opencode-go/grok-4.7": {
    "tools": true,
    "vision": true,
    "context_length": 500000,
    "traits": "mid price; strong general reasoning; fast"
   },
-  "ocpaid/opencode-go/kimi-k2.7-code": {
+  "ocgob/opencode-go/kimi-k2.7-code": {
    "tools": true,
    "vision": true,
    "traits": "mid price; specialised for code editing and tool use"
   },
-  "ocpaid/opencode-go/qwen3.8-max": {
+  "ocgoa/opencode-go/qwen3.8-max": {
    "tools": true,
    "vision": true,
    "traits": "premium price; deep reasoning; strongest of its family"
   },
-  "ocpaid/opencode-go/glm-5.3-flash": {
+  "ocgob/opencode-go/glm-5.3-flash": {
    "tools": true,
    "vision": true,
    "traits": "budget price; fast; light general model"
   },
-  "ocpaid/opencode-go/grok-4.6": {
+  "ocgoa/opencode-go/grok-4.6": {
    "tools": true,
    "vision": true,
    "traits": "mid price; solid general model"
   },
-  "ocpaid/opencode-go/gpt-5.6-luna": {
+  "ocgob/opencode-go/gpt-5.6-luna": {
    "tools": true,
    "vision": true,
    "traits": "premium price; strong reasoning"
   },
-  "ocpaid/opencode-go/glm-5.2": {
+  "ocgoa/opencode-go/glm-5.2": {
    "tools": true,
    "vision": false,
    "traits": "budget price; older general and coding model; no image input"
   },
-  "ocpaid/opencode-go/kimi-k2.6": {
+  "ocgob/opencode-go/kimi-k2.6": {
    "tools": true,
    "vision": true,
    "traits": "budget price; capable coding model"
   },
-  "ocpaid/opencode-go/deepseek-v4-flash": {
+  "ocgoa/opencode-go/deepseek-v4-flash": {
    "tools": true,
    "vision": false,
    "traits": "budget price; fast; simple tasks; no image input"
   },
-  "ocpaid/opencode-go/minimax-m3": {
+  "ocgob/opencode-go/minimax-m3": {
    "tools": true,
    "vision": null,
    "traits": "budget price; agentic tool use; verbose reasoning"
   },
-  "ocpaid/opencode-go/longcat-2.5-preview-free": {
+  "ocpv/opencode-go/longcat-2.5-preview-free": {
    "tools": true,
    "vision": true,
    "context_length": 1000000,
    "traits": "free preview; light general model"
   },
-  "ocpaid/opencode-go/cat-jam-free": {
+  "ocpv/opencode-go/cat-jam-free": {
    "tools": null,
    "vision": null,
    "context_length": 262144,
