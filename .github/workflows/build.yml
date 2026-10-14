@@ -1,0 +1,147 @@
+name: Build patched OmniRoute
+
+# Daily: find the newest upstream release, and if ghcr.io/<owner>/omniroute:<ver>-jev<rev> does not
+# exist yet, apply patches/, run the plugin tests, build the amd64 runner-web image and push it
+# with provenance + SBOM. A patch that no longer applies opens an issue and stops; the previous
+# image stays live. A patch that upstream already contains is dropped automatically.
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build (default: newest stable release)"
+        required: false
+        type: string
+      force:
+        description: "Rebuild even if the image tag already exists"
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [master]
+    paths: ["patches/**", "JEV_REV", "scripts/**", ".github/workflows/build.yml"]
+
+concurrency:
+  group: build-patched-omniroute
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/omniroute
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04   # 16 GB RAM; upstream's own web build needs ~12 GB of heap
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      issues: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve upstream tag and image tag
+        id: ver
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${INPUT_TAG:-$(scripts/latest-upstream-tag.sh)}"
+          case "$tag" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "bad tag: $tag" >&2; exit 1;; esac
+          rev="$(cat JEV_REV)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${tag#v}-jev$rev" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if this image tag already exists
+        id: exists
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$FORCE" != "true" ] && docker buildx imagetools inspect "$IMAGE:${{ steps.ver.outputs.image_tag }}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "$IMAGE:${{ steps.ver.outputs.image_tag }} exists; nothing to do"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.exists.outputs.skip != 'true'
+        with:
+          node-version: 26
+
+      - name: Clone upstream, apply patches, test
+        id: prep
+        if: steps.exists.outputs.skip != 'true'
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ steps.ver.outputs.tag }}" https://github.com/diegosouzapw/OmniRoute.git upstream || exit 1
+          scripts/apply-patches.sh upstream patches; rc=$?
+          if [ $rc -eq 3 ]; then echo "conflict=true" >> "$GITHUB_OUTPUT"; exit 1; fi
+          [ $rc -eq 0 ] || exit $rc
+          set -e
+          cd upstream
+          npm ci --no-audit --no-fund
+          DISABLE_SQLITE_AUTO_BACKUP=true node --max-old-space-size=8192 --import tsx/esm \
+            --import ./open-sse/utils/setupPolyfill.ts --import ./tests/_setup/isolateDataDir.ts \
+            --test --test-force-exit --test-concurrency=4 tests/unit/plugins-*.test.ts
+
+      - name: Open an issue when a patch no longer applies
+        if: failure() && steps.prep.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Patch does not apply to upstream ${{ steps.ver.outputs.tag }}"
+          if [ -z "$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number')" ]; then
+            gh issue create --title "$title" \
+              --body "The nightly build could not apply \`patches/\` to upstream ${{ steps.ver.outputs.tag }}. The previous image stays live. Run: scripts/build-image.sh ${{ steps.ver.outputs.tag }} locally, rebase the patch, bump JEV_REV. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+
+      - name: Build and push (amd64, runner-web)
+        id: push
+        if: steps.exists.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: upstream
+          target: runner-web
+          platforms: linux/amd64
+          build-args: |
+            OMNIROUTE_USE_TURBOPACK=0
+            OMNIROUTE_BUILD_MEMORY_MB=12288
+          tags: ${{ env.IMAGE }}:${{ steps.ver.outputs.image_tag }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.ver.outputs.image_tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/diegosouzapw/OmniRoute
+          provenance: mode=max
+          sbom: true
+          push: true
+          cache-from: type=gha,scope=omniroute-jev
+          cache-to: type=gha,scope=omniroute-jev,mode=max,ignore-error=true
+
+      - uses: actions/attest-build-provenance@v2
+        if: steps.exists.outputs.skip != 'true'
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        if: steps.exists.outputs.skip != 'true'
+        run: |
+          {
+            echo "### ${{ env.IMAGE }}:${{ steps.ver.outputs.image_tag }}"
+            echo "digest: \`${{ steps.push.outputs.digest }}\`"
+            echo "pin it: \`image: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

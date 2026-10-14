@@ -1,0 +1,560 @@
+From 39a4effe8aec13f2131658ad976b16aef9e7f01d Mon Sep 17 00:00:00 2001
+From: bedasrv <266547973+bedasrv@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 17:55:26 +0700
+Subject: [PATCH] plugins: add onRoute hook (pre-resolution model list ->
+ ephemeral priority combo)
+
+- onRoute plugin hook runs before combo/auto resolution; a plugin may return an ordered
+  list of explicit model ids, served as an in-memory priority combo (maxRetries 0).
+- API-key blockedModels always wins over the plugin's list.
+- loader: fail fast when the plugin child is dead (no 10 s stall per request); onRoute uses a
+  shorter timeout (OMNIROUTE_PLUGIN_ONROUTE_TIMEOUT_MS, default 5000).
+- tests: plugins-onroute.test.ts; BUILTIN_EVENTS pin updated.
+---
+ src/lib/plugins/hooks.ts                      | 55 ++++++++++++
+ src/lib/plugins/index.ts                      |  3 +
+ src/lib/plugins/loader.ts                     | 37 +++++++-
+ src/lib/plugins/manager.ts                    |  6 ++
+ src/lib/plugins/manifest.ts                   |  3 +
+ src/lib/plugins/sdk.ts                        | 14 ++-
+ src/sse/handlers/chat.ts                      | 21 ++++-
+ src/sse/handlers/chat/pluginOnRoute.ts        | 89 +++++++++++++++++++
+ tests/unit/plugins-onroute.test.ts            | 67 ++++++++++++++
+ tests/unit/plugins-welcome-banner-e2e.test.ts |  2 +
+ 10 files changed, 293 insertions(+), 4 deletions(-)
+ create mode 100644 src/sse/handlers/chat/pluginOnRoute.ts
+ create mode 100644 tests/unit/plugins-onroute.test.ts
+
+diff --git a/src/lib/plugins/hooks.ts b/src/lib/plugins/hooks.ts
+index 1f6589eb..b7fe5a94 100644
+--- a/src/lib/plugins/hooks.ts
++++ b/src/lib/plugins/hooks.ts
+@@ -34,6 +34,7 @@ export interface HookRegistration {
+ 
+ export const BUILTIN_EVENTS = [
+   "onRequest",
++  "onRoute",
+   "onResponse",
+   "onError",
+   "onInstall",
+@@ -236,6 +237,26 @@ export interface PluginContext {
+   metadata: Record<string, unknown>;
+ }
+ 
++/**
++ * onRoute: runs before model/combo resolution. A plugin may answer with an ordered
++ * list of explicit model ids (priority fallback order); the first plugin that returns
++ * a non-empty list wins. Anything else (nothing, error, timeout) leaves routing alone.
++ */
++export interface PluginRouteContext {
++  requestId: string;
++  body: unknown;
++  /** The model the client asked for, after alias/header resolution. */
++  model: string;
++  apiKeyInfo?: unknown;
++  headers?: Record<string, string | string[] | undefined>;
++}
++
++export interface PluginRouteResult {
++  models?: string[];
++  /** Free-form note recorded in the router log (never sent to the client). */
++  reason?: string;
++}
++
+ export interface PluginResult {
+   blocked?: boolean;
+   response?: unknown;
+@@ -250,6 +271,7 @@ export interface Plugin {
+   priority?: number;
+   enabled?: boolean;
+   onRequest?: (ctx: PluginContext) => Promise<PluginResult | void> | PluginResult | void;
++  onRoute?: (ctx: PluginRouteContext) => Promise<PluginRouteResult | void> | PluginRouteResult | void;
+   onResponse?: (ctx: PluginContext, response: unknown) => Promise<unknown | void> | unknown | void;
+   onError?: (ctx: PluginContext, error: Error) => Promise<unknown | void> | unknown | void;
+   // ── Lifecycle hooks (fire-and-forget, non-blocking) ──
+@@ -322,6 +344,39 @@ function ensurePluginsLoaded(): Promise<void> {
+   return pluginBoot;
+ }
+ 
++/**
++ * Run onRoute hooks in priority order; the first handler returning a non-empty list of
++ * model-id strings wins. Handler errors are logged and skipped (fail-open).
++ */
++export async function runOnRoute(ctx: PluginRouteContext): Promise<PluginRouteResult | null> {
++  await ensurePluginsLoaded();
++  const list = hooks.get("onRoute") || [];
++  for (const reg of list) {
++    if (isRateLimited(reg.pluginName)) {
++      log.warn("hook.route_rate_limited", { pluginName: reg.pluginName });
++      continue;
++    }
++    try {
++      const result = (await reg.handler(ctx)) as PluginRouteResult | void;
++      if (
++        result &&
++        typeof result === "object" &&
++        Array.isArray(result.models) &&
++        result.models.length > 0 &&
++        result.models.every((m) => typeof m === "string" && m.length > 0)
++      ) {
++        return result;
++      }
++    } catch (err: unknown) {
++      log.error("hook.route_handler_error", {
++        pluginName: reg.pluginName,
++        error: err instanceof Error ? err.message : String(err),
++      });
++    }
++  }
++  return null;
++}
++
+ /**
+  * Run onRequest hooks — blocking. Plugins can modify body/metadata or block with 403.
+  */
+diff --git a/src/lib/plugins/index.ts b/src/lib/plugins/index.ts
+index 656116f0..f6e1e04f 100644
+--- a/src/lib/plugins/index.ts
++++ b/src/lib/plugins/index.ts
+@@ -20,6 +20,8 @@
+ export type {
+   PluginContext,
+   PluginResult,
++  PluginRouteContext,
++  PluginRouteResult,
+   Plugin,
+   BlockingHookResult,
+   HookHandler,
+@@ -29,6 +31,7 @@ export type {
+ // Re-export execution functions from hooks.ts
+ export {
+   runOnRequest,
++  runOnRoute,
+   runOnResponse,
+   runOnError,
+   resetHooks as resetPlugins,
+diff --git a/src/lib/plugins/loader.ts b/src/lib/plugins/loader.ts
+index 71e9223b..4ffb6d97 100644
+--- a/src/lib/plugins/loader.ts
++++ b/src/lib/plugins/loader.ts
+@@ -17,7 +17,13 @@ import { tmpdir } from "os";
+ import { randomUUID, createHash } from "crypto";
+ import { logger } from "../../../open-sse/utils/logger.ts";
+ import type { PluginManifestWithDefaults, Permission } from "./manifest";
+-import type { Plugin, PluginContext, PluginResult } from "./index";
++import type {
++  Plugin,
++  PluginContext,
++  PluginResult,
++  PluginRouteContext,
++  PluginRouteResult,
++} from "./index";
+ 
+ const log = logger("PLUGIN_LOADER");
+ 
+@@ -306,6 +312,12 @@ export async function loadPlugin(
+   // Call a hook in the child process with a timeout. Blocking/lifecycle hooks escalate
+   // SIGTERM → SIGKILL on timeout; NOTIFICATION_HOOKS only drop the pending call.
+   const callHook = (hook: string, payload: unknown, timeout = hookTimeoutMs): Promise<unknown> => {
++    // A dead child (killed after a hook timeout, crashed, exited) is never respawned here, and
++    // child.send() on a closed channel would otherwise sit out the full hook timeout on EVERY
++    // later request. Fail fast so the registered hook stays fail-open without the stall.
++    if (child.exitCode !== null || child.signalCode !== null || !child.connected) {
++      return Promise.reject(new Error(`Plugin '${manifest.name}' process is not running`));
++    }
+     return new Promise((resolve, reject) => {
+       const id = String(++callCounter);
+       const timer = setTimeout(() => {
+@@ -342,6 +354,14 @@ export async function loadPlugin(
+   };
+ 
+   const registeredHooks: string[] = [];
++  // onRoute runs on the request path before any model is chosen: bound it tighter than the
++  // generic hook timeout (override with OMNIROUTE_PLUGIN_ONROUTE_TIMEOUT_MS).
++  const onRouteTimeoutMs = Math.min(
++    hookTimeoutMs,
++    Number(process.env.OMNIROUTE_PLUGIN_ONROUTE_TIMEOUT_MS) > 0
++      ? Number(process.env.OMNIROUTE_PLUGIN_ONROUTE_TIMEOUT_MS)
++      : 5000
++  );
+ 
+   if (manifest.hooks.onRequest) {
+     plugin.onRequest = async (ctx: PluginContext): Promise<PluginResult | void> => {
+@@ -358,6 +378,21 @@ export async function loadPlugin(
+     registeredHooks.push("onRequest");
+   }
+ 
++  if (manifest.hooks.onRoute) {
++    plugin.onRoute = async (ctx: PluginRouteContext): Promise<PluginRouteResult | void> => {
++      try {
++        const result = await callHook("onRoute", ctx, onRouteTimeoutMs);
++        return result as PluginRouteResult | void;
++      } catch (err: unknown) {
++        log.error("plugin.onRoute_error", {
++          name: manifest.name,
++          error: err instanceof Error ? err.message : String(err),
++        });
++      }
++    };
++    registeredHooks.push("onRoute");
++  }
++
+   if (manifest.hooks.onResponse) {
+     plugin.onResponse = async (ctx: PluginContext, response: unknown): Promise<unknown | void> => {
+       try {
+diff --git a/src/lib/plugins/manager.ts b/src/lib/plugins/manager.ts
+index d8bbbd63..bda9cc97 100644
+--- a/src/lib/plugins/manager.ts
++++ b/src/lib/plugins/manager.ts
+@@ -32,6 +32,7 @@ const log = logger("PLUGIN_MANAGER");
+ type LifecycleHookName = Extract<
+   keyof Plugin,
+   | "onRequest"
++  | "onRoute"
+   | "onResponse"
+   | "onError"
+   | "onInstall"
+@@ -218,6 +219,7 @@ class PluginManager {
+       configSchema: manifest.configSchema as unknown as Record<string, unknown>,
+       hooks: [
+         manifest.hooks.onRequest && "onRequest",
++        manifest.hooks.onRoute && "onRoute",
+         manifest.hooks.onResponse && "onResponse",
+         manifest.hooks.onError && "onError",
+         manifest.hooks.onInstall && "onInstall",
+@@ -349,6 +351,7 @@ class PluginManager {
+       configSchema: manifest.configSchema as unknown as Record<string, unknown>,
+       hooks: [
+         manifest.hooks.onRequest && "onRequest",
++        manifest.hooks.onRoute && "onRoute",
+         manifest.hooks.onResponse && "onResponse",
+         manifest.hooks.onError && "onError",
+         manifest.hooks.onInstall && "onInstall",
+@@ -408,6 +411,7 @@ class PluginManager {
+           fresh as unknown as Record<string, unknown>,
+           [
+             fresh.hooks.onRequest && "onRequest",
++            fresh.hooks.onRoute && "onRoute",
+             fresh.hooks.onResponse && "onResponse",
+             fresh.hooks.onError && "onError",
+             fresh.hooks.onInstall && "onInstall",
+@@ -463,6 +467,7 @@ class PluginManager {
+ 
+       const hookNames: LifecycleHookName[] = [
+         "onRequest",
++        "onRoute",
+         "onResponse",
+         "onError",
+         "onInstall",
+@@ -584,6 +589,7 @@ class PluginManager {
+             configSchema: discovered.manifest.configSchema as unknown as Record<string, unknown>,
+             hooks: [
+               discovered.manifest.hooks.onRequest && "onRequest",
++              discovered.manifest.hooks.onRoute && "onRoute",
+               discovered.manifest.hooks.onResponse && "onResponse",
+               discovered.manifest.hooks.onError && "onError",
+               discovered.manifest.hooks.onInstall && "onInstall",
+diff --git a/src/lib/plugins/manifest.ts b/src/lib/plugins/manifest.ts
+index fe38caa4..f609047d 100644
+--- a/src/lib/plugins/manifest.ts
++++ b/src/lib/plugins/manifest.ts
+@@ -37,6 +37,7 @@ export type ConfigField = z.infer<typeof ConfigFieldSchema>;
+ 
+ export const HooksSchema = z.object({
+   onRequest: z.boolean().optional(),
++  onRoute: z.boolean().optional(),
+   onResponse: z.boolean().optional(),
+   onError: z.boolean().optional(),
+   onInstall: z.boolean().optional(),
+@@ -100,6 +101,7 @@ export interface PluginManifestWithDefaults extends PluginManifest {
+   requires: { omniroute?: string; permissions: Permission[] };
+   hooks: {
+     onRequest: boolean;
++    onRoute: boolean;
+     onResponse: boolean;
+     onError: boolean;
+     onInstall: boolean;
+@@ -126,6 +128,7 @@ export function applyDefaults(manifest: PluginManifest): PluginManifestWithDefau
+     },
+     hooks: {
+       onRequest: manifest.hooks?.onRequest ?? false,
++      onRoute: manifest.hooks?.onRoute ?? false,
+       onResponse: manifest.hooks?.onResponse ?? false,
+       onError: manifest.hooks?.onError ?? false,
+       onInstall: manifest.hooks?.onInstall ?? false,
+diff --git a/src/lib/plugins/sdk.ts b/src/lib/plugins/sdk.ts
+index 245d882a..1d2cb83e 100644
+--- a/src/lib/plugins/sdk.ts
++++ b/src/lib/plugins/sdk.ts
+@@ -11,10 +11,19 @@ import type {
+   Plugin,
+   PluginContext,
+   PluginResult,
++  PluginRouteContext,
++  PluginRouteResult,
+   BlockingHookResult,
+ } from "./hooks.ts";
+ 
+-export type { Plugin, PluginContext, PluginResult, BlockingHookResult };
++export type {
++  Plugin,
++  PluginContext,
++  PluginResult,
++  PluginRouteContext,
++  PluginRouteResult,
++  BlockingHookResult,
++};
+ 
+ // ── Plugin Definition Helper ──
+ 
+@@ -27,6 +36,8 @@ export interface PluginDefinition {
+   enabled?: boolean;
+   /** Hook: runs before chat handler. Can block or modify request. */
+   onRequest?: (ctx: PluginContext) => Promise<PluginResult | void> | PluginResult | void;
++  /** Hook: runs before model resolution for any requested model; may return an ordered list of explicit model ids. Fail-open. */
++  onRoute?: (ctx: PluginRouteContext) => Promise<PluginRouteResult | void> | PluginRouteResult | void;
+   /** Hook: runs after chat handler. Can modify response. */
+   onResponse?: (ctx: PluginContext, response: unknown) => Promise<unknown | void> | unknown | void;
+   /** Hook: runs on handler error. Can recover or re-throw. */
+@@ -59,6 +70,7 @@ export function definePlugin(def: PluginDefinition): Plugin {
+     priority: def.priority ?? 100,
+     enabled: def.enabled ?? true,
+     onRequest: def.onRequest,
++    onRoute: def.onRoute,
+     onResponse: def.onResponse,
+     onError: def.onError,
+   };
+diff --git a/src/sse/handlers/chat.ts b/src/sse/handlers/chat.ts
+index fe6c074e..a4186acb 100644
+--- a/src/sse/handlers/chat.ts
++++ b/src/sse/handlers/chat.ts
+@@ -65,13 +65,14 @@ import { getPassthroughProviders } from "@omniroute/open-sse/config/providerRegi
+ import * as log from "../utils/logger";
+ import { checkAndRefreshToken } from "../services/tokenRefresh";
+ import { createHookContext, runHooks, initPreRequestRegistry } from "@/lib/middleware/registry";
++import { runPluginOnRouteHook, buildPluginRouteCombo } from "./chat/pluginOnRoute";
+ import { rejectPeerRequest } from "@/shared/resilience/peerRouting";
+ import { isRuntimeProviderRetirementError } from "@/shared/constants/providerRetirement";
+ import { isCommonChatGptWebRetirementError } from "@/shared/constants/chatgptWebRetirement";
+ import { isChatGptWebCodexModel } from "@/shared/constants/chatgptWebCodex";
+ import { deleteHandoff, getHandoff } from "@/lib/db/contextHandoffs";
+ import { getComboByName, updateCombo } from "@/lib/db/combos";
+-import { isModelAllowedForKey } from "@/lib/db/apiKeys";
++import { isModelAllowedForKey, isModelBlockedByPatterns } from "@/lib/db/apiKeys";
+ import { promoteSuccessfulComboModel } from "@/lib/combos/autoPromote";
+ import {
+   deleteSessionAccountAffinity,
+@@ -986,12 +987,28 @@ async function handleChatImplementation(
+   reasoningDecision = reasoningRouting.reasoningDecision;
+   requestRoutingTags = reasoningRouting.requestRoutingTags;
+ 
++  // Plugin onRoute hook: a plugin may pick the models (ordered, priority fallback) for this
++  // request before any combo/auto resolution. Fail-open; see chat/pluginOnRoute.ts.
++  let pluginRouteCombo: ReturnType<typeof buildPluginRouteCombo> | null = null;
++  {
++    const routed = await runPluginOnRouteHook({
++      requestId: reqId,
++      body,
++      model: resolvedModelStr,
++      apiKeyInfo,
++      headers: Object.fromEntries(request?.headers?.entries() || []),
++      isBlocked: (m) => isModelBlockedByPatterns(apiKeyInfo?.blockedModels, m),
++      log,
++    });
++    if (routed) pluginRouteCombo = buildPluginRouteCombo(resolvedModelStr, routed, reqId);
++  }
++
+   const autoRouting = await resolveAutoRoutingState(resolvedModelStr);
+   if (autoRouting.response) return autoRouting.response;
+ 
+   // Check if model is a combo (has multiple models with fallback)
+   telemetry.startPhase("resolve");
+-  let combo: any = await getComboForModel(resolvedModelStr);
++  let combo: any = pluginRouteCombo ?? (await getComboForModel(resolvedModelStr));
+   if (reasoningDecision?.targetCombo) combo = reasoningDecision.targetCombo;
+ 
+   // "auto" prefix fuzzy matching: "auto/fast" → "auto/best-fast", etc.
+diff --git a/src/sse/handlers/chat/pluginOnRoute.ts b/src/sse/handlers/chat/pluginOnRoute.ts
+new file mode 100644
+index 00000000..aabea626
+--- /dev/null
++++ b/src/sse/handlers/chat/pluginOnRoute.ts
+@@ -0,0 +1,89 @@
++/**
++ * Plugin `onRoute` hook for the chat handler.
++ *
++ * Runs before model/combo resolution. A plugin may answer with an ordered list of explicit
++ * model ids; they become an in-memory priority combo, so every existing combo behaviour
++ * (per-target API-key policy, connection selection, cooldowns, fallback) applies unchanged.
++ * Fail-open: no plugin, no answer, or any error leaves routing exactly as it was.
++ */
++
++type LoggerLike =
++  | {
++      info?: (...args: unknown[]) => void;
++      warn?: (...args: unknown[]) => void;
++      debug?: (...args: unknown[]) => void;
++    }
++  | null
++  | undefined;
++
++export const MAX_PLUGIN_ROUTE_MODELS = 12;
++
++export async function runPluginOnRouteHook(args: {
++  requestId: string;
++  body: unknown;
++  model: string;
++  apiKeyInfo: unknown;
++  headers?: Record<string, string | string[] | undefined>;
++  /**
++   * API-key deny list. An explicit deny always wins over a plugin's choice (a combo the key may
++   * use otherwise vouches for its members, so without this a plugin could route around it).
++   */
++  isBlocked?: (model: string) => Promise<boolean>;
++  log?: LoggerLike;
++}): Promise<string[] | null> {
++  try {
++    const { runOnRoute } = await import("@/lib/plugins/hooks");
++    const result = await runOnRoute({
++      requestId: args.requestId,
++      body: args.body,
++      model: args.model,
++      apiKeyInfo: args.apiKeyInfo,
++      headers: args.headers,
++    });
++    if (!result?.models?.length) return null;
++    let models = [...new Set(result.models)];
++    if (args.isBlocked) {
++      const keep: string[] = [];
++      for (const m of models) if (!(await args.isBlocked(m))) keep.push(m);
++      if (keep.length !== models.length) {
++        args.log?.info?.("PLUGIN", `onRoute: dropped ${models.length - keep.length} model(s) blocked by the API key`);
++      }
++      models = keep;
++    }
++    models = models.slice(0, MAX_PLUGIN_ROUTE_MODELS);
++    if (models.length === 0) return null;
++    args.log?.info?.(
++      "PLUGIN",
++      `onRoute: ${args.model} → [${models.join(", ")}]${result.reason ? ` (${result.reason})` : ""}`
++    );
++    return models;
++  } catch (err) {
++    args.log?.debug?.(
++      "PLUGIN",
++      `onRoute hook error (non-fatal): ${err instanceof Error ? err.message : String(err)}`
++    );
++    return null;
++  }
++}
++
++/** Same document shape as a stored priority combo, never persisted. */
++export function buildPluginRouteCombo(requestedModel: string, models: string[], requestId: string) {
++  return {
++    id: `plugin-route-${requestId}`,
++    name: requestedModel,
++    strategy: "priority",
++    models: models.map((model, i) => ({
++      id: `plugin-route-${i + 1}`,
++      kind: "model",
++      model,
++      weight: 0,
++    })),
++    // The list IS the fallback order: hop to the next model at once. (OmniRoute already rotates
++    // accounts inside one attempt; the default same-model retry would add a 2 s stall per dead member.)
++    config: { maxRetries: 0 },
++    isHidden: true,
++    isActive: true,
++    sortOrder: 0,
++    version: 1,
++  };
++}
+diff --git a/tests/unit/plugins-onroute.test.ts b/tests/unit/plugins-onroute.test.ts
+new file mode 100644
+index 00000000..7f5f18a5
+--- /dev/null
++++ b/tests/unit/plugins-onroute.test.ts
+@@ -0,0 +1,67 @@
++/**
++ * tests/unit/plugins-onroute.test.ts
++ *
++ * onRoute hook: first handler with a non-empty string[] wins, errors/garbage fall through
++ * (fail-open), and the helper builds a stored-shape priority combo from the list.
++ */
++
++import test from "node:test";
++import assert from "node:assert/strict";
++
++import { registerHook, runOnRoute, resetHooks } from "../../src/lib/plugins/hooks.ts";
++import {
++  buildPluginRouteCombo,
++  runPluginOnRouteHook,
++  MAX_PLUGIN_ROUTE_MODELS,
++} from "../../src/sse/handlers/chat/pluginOnRoute.ts";
++
++const ctx = { requestId: "r1", body: { model: "paid" }, model: "paid" };
++
++test.afterEach(() => {
++  resetHooks();
++});
++
++test("runOnRoute returns null with no handlers", async () => {
++  assert.equal(await runOnRoute(ctx), null);
++});
++
++test("runOnRoute: first non-empty list wins, priority order", async () => {
++  registerHook("onRoute", "late", () => ({ models: ["b/late"] }), 20);
++  registerHook("onRoute", "early", () => ({ models: ["a/one", "a/two"] }), 10);
++  const r = await runOnRoute(ctx);
++  assert.deepEqual(r?.models, ["a/one", "a/two"]);
++});
++
++test("runOnRoute fails open: throw, empty, non-array and non-string entries are skipped", async () => {
++  registerHook("onRoute", "boom", () => { throw new Error("x"); }, 1);
++  registerHook("onRoute", "empty", () => ({ models: [] }), 2);
++  registerHook("onRoute", "junk", () => ({ models: [1, 2] as unknown as string[] }), 3);
++  registerHook("onRoute", "none", () => undefined, 4);
++  registerHook("onRoute", "ok", () => ({ models: ["p/m"], reason: "r" }), 5);
++  const r = await runOnRoute(ctx);
++  assert.deepEqual(r?.models, ["p/m"]);
++});
++
++test("runOnRoute returns null when every handler declines", async () => {
++  registerHook("onRoute", "boom", () => { throw new Error("x"); }, 1);
++  assert.equal(await runOnRoute(ctx), null);
++});
++
++test("runPluginOnRouteHook dedupes and caps the list", async () => {
++  const many = Array.from({ length: 30 }, (_, i) => `p/m${i}`);
++  registerHook("onRoute", "p", () => ({ models: ["p/m0", ...many] }), 1);
++  const out = await runPluginOnRouteHook({
++    requestId: "r2", body: {}, model: "free", apiKeyInfo: null,
++  });
++  assert.equal(out?.length, MAX_PLUGIN_ROUTE_MODELS);
++  assert.equal(new Set(out).size, out?.length);
++  assert.equal(out?.[0], "p/m0");
++});
++
++test("buildPluginRouteCombo has stored priority-combo shape, named after the request", () => {
++  const c = buildPluginRouteCombo("paid", ["ocpaid/opencode/glm-5.3", "ocfree/opencode/space-bunny-free"], "r3");
++  assert.equal(c.name, "paid");
++  assert.equal(c.strategy, "priority");
++  assert.deepEqual(c.models.map((m) => m.model), ["ocpaid/opencode/glm-5.3", "ocfree/opencode/space-bunny-free"]);
++  assert.ok(c.models.every((m) => m.kind === "model" && m.id.startsWith("plugin-route-")));
++});
+diff --git a/tests/unit/plugins-welcome-banner-e2e.test.ts b/tests/unit/plugins-welcome-banner-e2e.test.ts
+index e03efd15..9ceef37d 100644
+--- a/tests/unit/plugins-welcome-banner-e2e.test.ts
++++ b/tests/unit/plugins-welcome-banner-e2e.test.ts
+@@ -319,6 +319,8 @@ test("plugin hooks system", async (t) => {
+   await t.test("BUILTIN_EVENTS contains only emitted/public plugin events", () => {
+     assert.deepEqual(BUILTIN_EVENTS, [
+       "onRequest",
++      // jev-router patch: pre-resolution routing hook (runOnRoute, called from chat.ts)
++      "onRoute",
+       "onResponse",
+       "onError",
+       "onInstall",
+-- 
+2.56.0
+

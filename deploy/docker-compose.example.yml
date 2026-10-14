@@ -1,0 +1,32 @@
+# Production compose for the patched OmniRoute (replaces ~/Containers/omniroute/docker-compose.yml's image + volumes).
+# Pin the DIGEST printed in the build summary; never :latest. Upgrade: change the digest, `docker compose pull && up -d`.
+# Rollback: put the previous digest back.
+name: omniroute
+services:
+  omniroute:
+    image: ghcr.io/bedasrv/omniroute@sha256:REPLACE_WITH_DIGEST   # e.g. 3.8.51-jev1
+    container_name: omniroute
+    restart: unless-stopped
+    stop_grace_period: 40s
+    env_file: .env
+    environment:
+      - DATA_DIR=/app/data
+      - PORT=20128
+      - HOSTNAME=127.0.0.1
+      - OMNIROUTE_EMERGENCY_FALLBACK=false
+      - OMNIROUTE_ALLOW_PRIVATE_PROVIDER_URLS=true
+      - OMNIROUTE_ALLOW_LOCAL_PROVIDER_URLS=true
+      - OMNIROUTE_PLUGINS_DIR=/app/plugins          # where the jev-router plugin lives (register once: POST /api/plugins {"path":"/app/plugins/jev-router"})
+    volumes:
+      - ./data:/app/data
+      - ./plugins:/app/plugins                        # = a checkout/copy of this repo's plugin/ dir as ./plugins/jev-router (policy.json hot-reloads)
+      # listing-source key for policy.json (key_file/key_var), read-only; the plugin cannot see container env vars
+      - /home/user/.config/opencode/oc-paid-proxy.env:/home/user/.config/opencode/oc-paid-proxy.env:ro
+    mem_limit: 6g
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    network_mode: host
