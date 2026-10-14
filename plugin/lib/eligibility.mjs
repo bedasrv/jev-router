@@ -31,6 +31,7 @@ export function usableWindow(f, reserve) {
 
 // Returns {ok, reason}. A null/absent flag is ineligible only when the request needs it.
 export function eligible(f, req) {
+  if (f?.unlisted === true) return { ok: false, reason: "not_listed" };
   if (req.usesTools && f?.tools !== true) return { ok: false, reason: "tools" };
   if (req.images > 0 && f?.vision !== true) return { ok: false, reason: "vision" };
   if (req.tokens > usableWindow(f, req.reserve)) return { ok: false, reason: "window" };

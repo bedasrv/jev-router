@@ -1,4 +1,4 @@
-{ "name": "jev-router", "version": "0.1.0", "description": "Pre-resolution model routing for the free/paid pools (P1: static order, no Jev)", "main": "index.mjs",
+{ "name": "jev-router", "version": "0.2.0", "description": "Pre-resolution model routing for the free/paid pools (P1: static order, no Jev)", "main": "index.mjs",
   "enabledByDefault": true,
   "requires": { "permissions": ["network", "file-read", "file-write"] },
   "hooks": { "onRoute": true } }

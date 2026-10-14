@@ -4,6 +4,7 @@
  "log_file": "decisions.jsonl",
  "limits": {
   "max_main": 3,
+  "max_main_free": 4,
   "max_spill": 2
  },
  "sources": [
@@ -41,13 +42,13 @@
   ],
   "free": [
    "ocfree/opencode/space-bunny-free",
+   "ocpaid/opencode-go/longcat-2.5-preview-free",
    "ocfree/opencode/muse-spark-1.3-contributor-free",
    "ocfree/opencode/ling-3.1-flash-free",
    "ocfree/opencode/nemotron-3.5-lightning-free",
    "ocfree/opencode/mimo-v2.6-flash-free",
    "ocfree/opencode/muse-spark-1.2-contributor-free",
-   "ocfree/opencode/cat-jam-free",
-   "mscopilot/default"
+   "ocfree/opencode/cat-jam-free"
   ]
  },
  "denylist": [
@@ -164,5 +165,9 @@
    "tools": null,
    "vision": null
   }
+ },
+ "last_resort": {
+  "free": "mscopilot/default",
+  "paid": "mscopilot/default"
  }
 }

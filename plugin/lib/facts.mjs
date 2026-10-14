@@ -43,7 +43,13 @@ export function createFacts({ fetchImpl = fetch, readFile = (f) => fs.readFileSy
     ensure(policy);
     const out = {};
     const ids = new Set([...policy.order.paid, ...policy.order.free]);
-    for (const id of ids) out[id] = { ...(listed.get(id) ?? {}), ...(policy.models?.[id] ?? {}) };
+    const loaded = new Set([...listed.keys()].map((k) => k.split("/")[0]));
+    for (const id of [...ids, ...Object.values(policy.last_resort ?? {})]) {
+      const prefix = id.split("/")[0];
+      const isSource = (policy.sources ?? []).some((x) => x.prefix === prefix);
+      // a source whose listing has loaded is authoritative: an id it lacks is not dispatchable
+      out[id] = { ...(listed.get(id) ?? {}), ...(policy.models?.[id] ?? {}), ...(isSource && loaded.has(prefix) && !listed.has(id) ? { unlisted: true } : {}) };
+    }
     return out;
   }
   return { get, refresh, listed };

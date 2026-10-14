@@ -104,3 +104,17 @@ test("helpers", () => {
   assert.equal(eligible({ tools: true, context_length: 100000 }, inspectRequest({ messages: [{ role: "user", content: "x" }] })).ok, true);
   assert.deepEqual(alternate(["a/1", "a/2", "b/1"], {}), ["a/1", "b/1", "a/2"]);
 });
+test("last_resort is appended after the cap, once, and only if eligible", async () => {
+  const p = basePolicy(); p.last_resort = { free: "l/last", paid: "l/last" }; p.models["l/last"] = { tools: null };
+  const { r } = mk(p);
+  let out = await r.onRoute({ ...user("hi"), model: "free" });
+  assert.equal(out.models.at(-1), "l/last");
+  out = await r.onRoute({ ...user("hi", { tools: [{}] }), model: "free" });
+  assert.ok(!out.models.includes("l/last")); // tools unknown -> ineligible
+});
+test("an id missing from a loaded listing is excluded as not_listed", async () => {
+  const p = basePolicy(); p.models["a/p1"].unlisted = true;
+  const { r } = mk(p);
+  const out = await r.onRoute(user("hi"));
+  assert.ok(!out.models.includes("a/p1"));
+});

@@ -20,7 +20,7 @@ export function alternate(ids, facts, lastDomain = null) {
 export function buildList({ pool, policy, facts, req, preferred = null, now = Date.now() }) {
   const deny = new Set(policy.denylist ?? []);
   const lim = policy.limits ?? {};
-  const maxMain = lim.max_main ?? 3, maxSpill = lim.max_spill ?? 2;
+  const maxMain = (pool === "free" ? lim.max_main_free : null) ?? lim.max_main ?? 3, maxSpill = lim.max_spill ?? 2;
   const excluded = [];
   const pick = (ids) => ids.filter((id) => {
     if (deny.has(id)) { excluded.push({ id, reason: "denylist" }); return false; }
@@ -43,5 +43,8 @@ export function buildList({ pool, policy, facts, req, preferred = null, now = Da
   const tail = alternate(spill.slice(0, pool === "paid" ? maxSpill : 0), facts, head.length ? domainOf(head.at(-1), facts) : null);
   models = [...new Set([...head, ...tail])];
   if (pool === "free") models = alternate(main.slice(0, maxMain), facts);
+  // last resort (e.g. mscopilot): appended after the cap, only if eligible and not already listed
+  const last = policy.last_resort?.[pool];
+  if (last && !models.includes(last) && !deny.has(last) && eligible(facts[last], req).ok) models.push(last);
   return { models, excluded, nofit: false };
 }
