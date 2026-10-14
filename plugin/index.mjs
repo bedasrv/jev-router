@@ -5,6 +5,7 @@ import { createFacts } from "./lib/facts.mjs";
 import { inspectRequest } from "./lib/eligibility.mjs";
 import { buildList, eligibleIds } from "./lib/builder.mjs";
 import { createJev, buildPayload, askText } from "./lib/jev.mjs";
+import { createHealth } from "./lib/health.mjs";
 import { conversationKey, isFresh, createSessions, hash } from "./lib/sessions.mjs";
 import { createLog } from "./lib/decision-log.mjs";
 
@@ -18,13 +19,16 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
   const factsSrc = facts ?? createFacts({ log: (r) => log(r) });
   const sessions = createSessions();
   const jevClient = jev ?? createJev();
+  let health = createHealth({ now, log: (r) => log(r) });
+  let healthCfg = "";
 
   // Jev: shadow = ask in the background and only log; on = wait (<= deadline) and lead with a confident pick.
   function jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead }) {
     const cfg = policy.jev;
     if (!cfg || cfg.mode === "off" || !cfg.mode || !fresh) return null;
     const cap = cfg.max_shown?.[pool] ?? (pool === "paid" ? 12 : 8);
-    const shown = eligibleIds({ pool, policy, facts: f, req }).main.slice(0, cap);
+    const el = eligibleIds({ pool, policy, facts: f, req, health });
+    const shown = el.main.filter((id) => !el.cooling.includes(id)).slice(0, cap);
     if (shown.length < 2) return null;
     const payload = buildPayload({ pool, ask: askText(body), req, shown, facts: f, policy });
     const p = jevClient.ask(cfg, payload).then((res) => {
@@ -50,6 +54,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     const policy = loadPolicy();
     if (!policy) return undefined;
     log = createLog(policy.log_file ? path.resolve(path.dirname(policyFile), policy.log_file) : null);
+    syncHealth(policy);
     const body = ctx.body ?? {};
     const req = inspectRequest(body);
     const key = conversationKey(ctx.headers, body);
@@ -57,13 +62,13 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     const prev = fresh ? null : sessions.get(key, now());
     const f = factsSrc.get(policy);
     let preferred = prev?.head ?? null;
-    let { models, excluded, nofit } = buildList({ pool, policy, facts: f, req, preferred });
+    let { models, excluded, nofit, cooling } = buildList({ pool, policy, facts: f, req, preferred, health });
     let jevInfo;
     const step = models.length ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0] }) : null;
     if (step?.mode === "on") {
       const out = await step.promise;
       if (out?.res.ok && out.res.confidence >= out.thr) {
-        ({ models, excluded, nofit } = buildList({ pool, policy, facts: f, req, preferred: out.pick }));
+        ({ models, excluded, nofit, cooling } = buildList({ pool, policy, facts: f, req, preferred: out.pick, health }));
         jevInfo = { applied: out.pick, confidence: Number(out.res.confidence.toFixed(3)) };
       }
     }
@@ -71,9 +76,29 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     sessions.set(key, { head: models[0] }, now());
     log({
       event: "decision", id: ctx.requestId ?? null, pool, conv: hash(key), fresh, est_tokens: req.tokens, reserve: req.reserve,
-      tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode,
+      tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode, demoted: cooling?.length ? cooling : undefined,
     });
     return { models, reason: `${jevInfo ? "jev" : "static"}:${pool}${fresh ? "" : ":cont"}` };
+  }
+
+  // Health knobs live in policy.health; changing them keeps what was learned (only the thresholds change).
+  function syncHealth(policy) {
+    const key = JSON.stringify(policy.health ?? {});
+    if (key !== healthCfg) { healthCfg = key; health = createHealth({ now, cfg: policy.health ?? {}, log: (r) => log(r), prev: health }); }
+  }
+
+  // onRouteResult: OmniRoute tells us how each of our picks went. One-way; must never throw.
+  function onRouteResult(payload) {
+    try {
+      if (!payload || !Array.isArray(payload.attempts)) return;
+      const before = Object.keys(health.snapshot()).length;
+      health.record(payload);
+      const bad = payload.attempts.filter((a) => !a.ok);
+      log({ event: "result", id: payload.requestId ?? null, pool: payload.model, status: payload.status,
+        attempts: payload.attempts.map((a) => ({ m: a.model, ok: a.ok, s: a.status, k: a.kind, ms: a.latencyMs })),
+        skipped: payload.skipped?.length ? payload.skipped : undefined,
+        cooling: Object.keys(health.snapshot()).length !== before || bad.length ? health.snapshot() : undefined });
+    } catch (e) { log({ event: "error", error: String(e?.message ?? e) }); }
   }
 
   // Fail-open with a hard deadline: return nothing rather than reach OmniRoute's kill path.
@@ -88,8 +113,9 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       return undefined;
     }
   }
-  return { onRoute, decide };
+  return { onRoute, onRouteResult, decide, health: () => health };
 }
 
 const router = createRouter();
 export const onRoute = router.onRoute;
+export const onRouteResult = router.onRouteResult;

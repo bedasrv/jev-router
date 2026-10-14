@@ -1,7 +1,7 @@
 From 39a4effe8aec13f2131658ad976b16aef9e7f01d Mon Sep 17 00:00:00 2001
 From: bedasrv <266547973+bedasrv@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 17:55:26 +0700
-Subject: [PATCH] plugins: add onRoute hook (pre-resolution model list ->
+Subject: [PATCH 1/2] plugins: add onRoute hook (pre-resolution model list ->
  ephemeral priority combo)
 
 - onRoute plugin hook runs before combo/auto resolution; a plugin may return an ordered

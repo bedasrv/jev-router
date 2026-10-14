@@ -1,0 +1,597 @@
+From 11ff6725aee807c9d0a71afaae6f9cd78f14fb5e Mon Sep 17 00:00:00 2001
+From: bedasrv <266547973+bedasrv@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 00:18:32 +0700
+Subject: [PATCH 2/2] plugins: add onRouteResult hook (per-attempt outcomes of
+ a plugin-routed combo)
+
+Records the HTTP status and classified kind of every dispatched combo attempt in the
+combo decision trace (no error bodies), and sends them, with the pre-dispatch skips,
+to plugins that declare hooks.onRouteResult once the plugin-routed combo has finished.
+One-way notification (fire-and-forget, same isolation as onStreamComplete): a slow or
+broken plugin cannot delay or fail the request. Lets a routing plugin learn which of its
+picks are failing and demote them.
+
+- decisionTrace: ComboTrace.outcomes + recordComboOutcome
+- executeTargetAttempt: record outcome on success and on each failure path
+- plugins: onRouteResult event, manifest flag, loader notification wiring, SDK/types
+- chat: emitPluginRouteResult after handleComboChat; ephemeral combo carries traceInvocationId
+- tests: plugins-onroute (outcomes, payload, fail-open), BUILTIN_EVENTS pin
+---
+ open-sse/services/combo/decisionTrace.ts      | 27 +++++++++
+ .../services/combo/executeTargetAttempt.ts    | 31 +++++++++-
+ src/lib/plugins/hooks.ts                      | 39 +++++++++++++
+ src/lib/plugins/index.ts                      |  3 +
+ src/lib/plugins/loader.ts                     | 11 +++-
+ src/lib/plugins/manager.ts                    |  6 ++
+ src/lib/plugins/manifest.ts                   |  3 +
+ src/lib/plugins/sdk.ts                        |  5 ++
+ src/sse/handlers/chat.ts                      | 17 +++++-
+ src/sse/handlers/chat/pluginOnRoute.ts        | 47 ++++++++++++++++
+ tests/unit/plugins-onroute.test.ts            | 56 +++++++++++++++++++
+ tests/unit/plugins-welcome-banner-e2e.test.ts |  1 +
+ 12 files changed, 242 insertions(+), 4 deletions(-)
+
+diff --git a/open-sse/services/combo/decisionTrace.ts b/open-sse/services/combo/decisionTrace.ts
+index 54616897..95a6b6c7 100644
+--- a/open-sse/services/combo/decisionTrace.ts
++++ b/open-sse/services/combo/decisionTrace.ts
+@@ -93,12 +93,28 @@ export interface AutoEvaluationTrace {
+   transitions: AutoEvaluationTransition[];
+ }
+ 
++/**
++ * Per-attempt result of a dispatched target. Routing metadata only (same safety contract as the
++ * decisions above): the HTTP status and the allowlisted classification, never an error body.
++ */
++export interface ComboOutcomeEntry {
++  /** "<provider>/<model>" as dispatched (the combo step's model string). */
++  target: string;
++  ok: boolean;
++  status: number | null;
++  /** classifyComboOutcome kind (auth | rate_limit | timeout | provider | model | quality ...), null on success. */
++  kind: string | null;
++  latencyMs: number;
++  ts: number;
++}
++
+ export interface ComboTrace {
+   invocationId: string;
+   createdAt: number;
+   strategy: string | null;
+   comboName: string | null;
+   decisions: ComboTraceEntry[];
++  outcomes: ComboOutcomeEntry[];
+   autoEvaluation: AutoEvaluationTrace | null;
+   terminal: { status: number | null; errorClass: string | null } | null;
+ }
+@@ -218,6 +234,7 @@ export function startComboTrace(
+       strategy: meta.strategy ?? null,
+       comboName: meta.comboName ?? null,
+       decisions: [],
++      outcomes: [],
+       autoEvaluation: null,
+       terminal: null,
+     });
+@@ -245,6 +262,16 @@ export function recordComboDecision(
+   });
+ }
+ 
++/** Record the HTTP-level result of one dispatched attempt (called for every attempt, success or failure). */
++export function recordComboOutcome(
++  invocationId: string,
++  entry: Omit<ComboOutcomeEntry, "ts">
++): void {
++  const trace = traces.get(invocationId);
++  if (!trace) return;
++  trace.outcomes.push({ ...entry, ts: Date.now() });
++}
++
+ /** One skip reason's targets, for the ALL_TARGETS_SKIPPED diagnostics body. */
+ export interface SkippedTargetGroup {
+   reason: ComboSkipReason;
+diff --git a/open-sse/services/combo/executeTargetAttempt.ts b/open-sse/services/combo/executeTargetAttempt.ts
+index 5a13fe8d..2db6dca6 100644
+--- a/open-sse/services/combo/executeTargetAttempt.ts
++++ b/open-sse/services/combo/executeTargetAttempt.ts
+@@ -72,7 +72,7 @@ import {
+ } from "./comboPredicates.ts";
+ import { applyComboTargetExhaustion } from "./targetExhaustion.ts";
+ import { advanceNativeCodexTurnGeneration, pinNativeCodexTurn } from "./nativeCodexTurnPin.ts";
+-import { recordComboDecision } from "./decisionTrace.ts";
++import { recordComboDecision, recordComboOutcome } from "./decisionTrace.ts";
+ import { recordProviderCooldown } from "../providerCooldownTracker.ts";
+ import {
+   validateResponseQuality,
+@@ -359,6 +359,7 @@ export async function executeTargetAttempt(opts: {
+         decision: "dispatched",
+       });
+     }
++    const attemptStartedAt = Date.now();
+     const result = await deps.handleSingleModelWithTimeout(attemptBody, modelStr, {
+       ...targetForAttempt,
+       effectiveComboStrategy: deps.strategy,
+@@ -421,6 +422,13 @@ export async function executeTargetAttempt(opts: {
+           error: quality.reason || "upstream response failed quality validation",
+           kind: qualityFailure.kind,
+         });
++        recordComboOutcome(deps.traceInvocationId, {
++          target: modelStr,
++          ok: false,
++          status: qualityFailure.status,
++          kind: String(qualityFailure.kind),
++          latencyMs: Date.now() - attemptStartedAt,
++        });
+         if (i > 0) state.fallbackCount++;
+         state.requestScopedFailureSeen ||= qualityFailure.requestScoped;
+         if (qualityFailure.requestScoped)
+@@ -495,6 +503,13 @@ export async function executeTargetAttempt(opts: {
+       }
+ 
+       const latencyMs = Date.now() - deps.startTime;
++      recordComboOutcome(deps.traceInvocationId, {
++        target: modelStr,
++        ok: true,
++        status: result.status,
++        kind: null,
++        latencyMs: Date.now() - attemptStartedAt,
++      });
+       emit("combo.target.succeeded", {
+         comboName: deps.combo.name,
+         targetIndex: i,
+@@ -936,6 +951,13 @@ export async function executeTargetAttempt(opts: {
+         error: errorText || String(result.status),
+         kind: classifyComboOutcome(result.status, errorText),
+       });
++      recordComboOutcome(deps.traceInvocationId, {
++        target: modelStr,
++        ok: false,
++        status: result.status,
++        kind: classifyComboOutcome(result.status, errorText),
++        latencyMs: Date.now() - attemptStartedAt,
++      });
+       state.lastStatus = result.status;
+       if (i > 0) state.fallbackCount++;
+       deps.log.warn("COMBO", `Model ${modelStr} failed with body-specific error, stopping combo`);
+@@ -1161,6 +1183,13 @@ export async function executeTargetAttempt(opts: {
+       error: errorText || String(result.status),
+       kind: classifyComboOutcome(result.status, errorText),
+     });
++    recordComboOutcome(deps.traceInvocationId, {
++      target: modelStr,
++      ok: false,
++      status: result.status,
++      kind: classifyComboOutcome(result.status, errorText),
++      latencyMs: Date.now() - attemptStartedAt,
++    });
+     state.lastStatus = result.status;
+     if (i > 0) state.fallbackCount++;
+     // Wire combo failures into the resilience dashboard (model-level lockout)
+diff --git a/src/lib/plugins/hooks.ts b/src/lib/plugins/hooks.ts
+index b7fe5a94..f8bb6c00 100644
+--- a/src/lib/plugins/hooks.ts
++++ b/src/lib/plugins/hooks.ts
+@@ -35,6 +35,7 @@ export interface HookRegistration {
+ export const BUILTIN_EVENTS = [
+   "onRequest",
+   "onRoute",
++  "onRouteResult",
+   "onResponse",
+   "onError",
+   "onInstall",
+@@ -280,6 +281,44 @@ export interface Plugin {
+   onDeactivate?: (payload: unknown) => Promise<void> | void;
+   onUninstall?: (payload: unknown) => Promise<void> | void;
+   onStreamComplete?: (payload: PluginOnStreamCompletePayload) => Promise<void> | void;
++  /** One-way notification after a plugin-routed request finished: how each dispatched target went. */
++  onRouteResult?: (payload: PluginRouteResultPayload) => Promise<void> | void;
++}
++
++// ── onRouteResult event types ──
++
++/** One dispatched attempt of the combo built from an onRoute answer. */
++export interface PluginRouteOutcome {
++  /** The model id as the plugin returned it (the combo step's model string). */
++  model: string;
++  ok: boolean;
++  status: number | null;
++  /** auth | rate_limit | timeout | provider | model | ... (null on success). Never an error body. */
++  kind: string | null;
++  latencyMs: number;
++}
++
++/**
++ * onRouteResult: fire-and-forget, sent once per request whose model list came from an onRoute plugin,
++ * after the combo finished (success or exhausted). Lets the plugin learn which of its picks failed.
++ */
++export interface PluginRouteResultPayload {
++  requestId: string;
++  /** The model the client asked for (e.g. "free" / "paid"). */
++  model: string;
++  /** Final HTTP status of the combo response. */
++  status: number;
++  /** Models the plugin listed, in order. */
++  listed: string[];
++  /** Dispatched attempts in the order they ran. */
++  attempts: PluginRouteOutcome[];
++  /** Targets OmniRoute skipped before dispatch (cooldown, lockout, ...), with its allowlisted reason. */
++  skipped: Array<{ model: string; reason: string }>;
++}
++
++/** Run onRouteResult hooks — fire-and-forget notification. */
++export async function runOnRouteResult(payload: PluginRouteResultPayload): Promise<void> {
++  await emitHook("onRouteResult", payload);
+ }
+ 
+ // ── onStreamComplete event types ──
+diff --git a/src/lib/plugins/index.ts b/src/lib/plugins/index.ts
+index f6e1e04f..86ef0faf 100644
+--- a/src/lib/plugins/index.ts
++++ b/src/lib/plugins/index.ts
+@@ -22,6 +22,8 @@ export type {
+   PluginResult,
+   PluginRouteContext,
+   PluginRouteResult,
++  PluginRouteOutcome,
++  PluginRouteResultPayload,
+   Plugin,
+   BlockingHookResult,
+   HookHandler,
+@@ -32,6 +34,7 @@ export type {
+ export {
+   runOnRequest,
+   runOnRoute,
++  runOnRouteResult,
+   runOnResponse,
+   runOnError,
+   resetHooks as resetPlugins,
+diff --git a/src/lib/plugins/loader.ts b/src/lib/plugins/loader.ts
+index 4ffb6d97..edbb03d1 100644
+--- a/src/lib/plugins/loader.ts
++++ b/src/lib/plugins/loader.ts
+@@ -38,7 +38,7 @@ const SIGKILL_GRACE_MS = 3_000;
+ // plugin dead-but-shown-active until a manual deactivate/activate. Blocking hooks
+ // (onRequest/onResponse/onError) and the rarely-fired lifecycle hooks keep the
+ // kill-on-timeout isolation semantics.
+-const NOTIFICATION_HOOKS: ReadonlySet<string> = new Set(["onStreamComplete"]);
++const NOTIFICATION_HOOKS: ReadonlySet<string> = new Set(["onStreamComplete", "onRouteResult"]);
+ 
+ // #8395: stdout/stderr forwarding hygiene — cap how much of a plugin's own console
+ // output we relay per stream, so a runaway/misbehaving plugin can't flood memory or
+@@ -426,7 +426,13 @@ export async function loadPlugin(
+   // applies. Without this branch the event fires into an empty registry and is dropped
+   // for every disk-installed plugin (#11825).
+   const lifecycleHooks: Array<{
+-    key: "onInstall" | "onActivate" | "onDeactivate" | "onUninstall" | "onStreamComplete";
++    key:
++      | "onInstall"
++      | "onActivate"
++      | "onDeactivate"
++      | "onUninstall"
++      | "onStreamComplete"
++      | "onRouteResult";
+     manifestFlag: boolean;
+   }> = [
+     { key: "onInstall", manifestFlag: manifest.hooks.onInstall },
+@@ -434,6 +440,7 @@ export async function loadPlugin(
+     { key: "onDeactivate", manifestFlag: manifest.hooks.onDeactivate },
+     { key: "onUninstall", manifestFlag: manifest.hooks.onUninstall },
+     { key: "onStreamComplete", manifestFlag: manifest.hooks.onStreamComplete },
++    { key: "onRouteResult", manifestFlag: manifest.hooks.onRouteResult },
+   ];
+ 
+   for (const { key, manifestFlag } of lifecycleHooks) {
+diff --git a/src/lib/plugins/manager.ts b/src/lib/plugins/manager.ts
+index bda9cc97..6e3719b8 100644
+--- a/src/lib/plugins/manager.ts
++++ b/src/lib/plugins/manager.ts
+@@ -33,6 +33,7 @@ type LifecycleHookName = Extract<
+   keyof Plugin,
+   | "onRequest"
+   | "onRoute"
++  | "onRouteResult"
+   | "onResponse"
+   | "onError"
+   | "onInstall"
+@@ -220,6 +221,7 @@ class PluginManager {
+       hooks: [
+         manifest.hooks.onRequest && "onRequest",
+         manifest.hooks.onRoute && "onRoute",
++        manifest.hooks.onRouteResult && "onRouteResult",
+         manifest.hooks.onResponse && "onResponse",
+         manifest.hooks.onError && "onError",
+         manifest.hooks.onInstall && "onInstall",
+@@ -352,6 +354,7 @@ class PluginManager {
+       hooks: [
+         manifest.hooks.onRequest && "onRequest",
+         manifest.hooks.onRoute && "onRoute",
++        manifest.hooks.onRouteResult && "onRouteResult",
+         manifest.hooks.onResponse && "onResponse",
+         manifest.hooks.onError && "onError",
+         manifest.hooks.onInstall && "onInstall",
+@@ -412,6 +415,7 @@ class PluginManager {
+           [
+             fresh.hooks.onRequest && "onRequest",
+             fresh.hooks.onRoute && "onRoute",
++            fresh.hooks.onRouteResult && "onRouteResult",
+             fresh.hooks.onResponse && "onResponse",
+             fresh.hooks.onError && "onError",
+             fresh.hooks.onInstall && "onInstall",
+@@ -468,6 +472,7 @@ class PluginManager {
+       const hookNames: LifecycleHookName[] = [
+         "onRequest",
+         "onRoute",
++        "onRouteResult",
+         "onResponse",
+         "onError",
+         "onInstall",
+@@ -590,6 +595,7 @@ class PluginManager {
+             hooks: [
+               discovered.manifest.hooks.onRequest && "onRequest",
+               discovered.manifest.hooks.onRoute && "onRoute",
++              discovered.manifest.hooks.onRouteResult && "onRouteResult",
+               discovered.manifest.hooks.onResponse && "onResponse",
+               discovered.manifest.hooks.onError && "onError",
+               discovered.manifest.hooks.onInstall && "onInstall",
+diff --git a/src/lib/plugins/manifest.ts b/src/lib/plugins/manifest.ts
+index f609047d..20a8f38a 100644
+--- a/src/lib/plugins/manifest.ts
++++ b/src/lib/plugins/manifest.ts
+@@ -38,6 +38,7 @@ export type ConfigField = z.infer<typeof ConfigFieldSchema>;
+ export const HooksSchema = z.object({
+   onRequest: z.boolean().optional(),
+   onRoute: z.boolean().optional(),
++  onRouteResult: z.boolean().optional(),
+   onResponse: z.boolean().optional(),
+   onError: z.boolean().optional(),
+   onInstall: z.boolean().optional(),
+@@ -102,6 +103,7 @@ export interface PluginManifestWithDefaults extends PluginManifest {
+   hooks: {
+     onRequest: boolean;
+     onRoute: boolean;
++    onRouteResult: boolean;
+     onResponse: boolean;
+     onError: boolean;
+     onInstall: boolean;
+@@ -129,6 +131,7 @@ export function applyDefaults(manifest: PluginManifest): PluginManifestWithDefau
+     hooks: {
+       onRequest: manifest.hooks?.onRequest ?? false,
+       onRoute: manifest.hooks?.onRoute ?? false,
++      onRouteResult: manifest.hooks?.onRouteResult ?? false,
+       onResponse: manifest.hooks?.onResponse ?? false,
+       onError: manifest.hooks?.onError ?? false,
+       onInstall: manifest.hooks?.onInstall ?? false,
+diff --git a/src/lib/plugins/sdk.ts b/src/lib/plugins/sdk.ts
+index 1d2cb83e..dd978fd3 100644
+--- a/src/lib/plugins/sdk.ts
++++ b/src/lib/plugins/sdk.ts
+@@ -13,6 +13,7 @@ import type {
+   PluginResult,
+   PluginRouteContext,
+   PluginRouteResult,
++  PluginRouteResultPayload,
+   BlockingHookResult,
+ } from "./hooks.ts";
+ 
+@@ -22,6 +23,7 @@ export type {
+   PluginResult,
+   PluginRouteContext,
+   PluginRouteResult,
++  PluginRouteResultPayload,
+   BlockingHookResult,
+ };
+ 
+@@ -38,6 +40,8 @@ export interface PluginDefinition {
+   onRequest?: (ctx: PluginContext) => Promise<PluginResult | void> | PluginResult | void;
+   /** Hook: runs before model resolution for any requested model; may return an ordered list of explicit model ids. Fail-open. */
+   onRoute?: (ctx: PluginRouteContext) => Promise<PluginRouteResult | void> | PluginRouteResult | void;
++  /** Hook (one-way): after a plugin-routed request finished, how each dispatched target went. */
++  onRouteResult?: (payload: PluginRouteResultPayload) => Promise<void> | void;
+   /** Hook: runs after chat handler. Can modify response. */
+   onResponse?: (ctx: PluginContext, response: unknown) => Promise<unknown | void> | unknown | void;
+   /** Hook: runs on handler error. Can recover or re-throw. */
+@@ -71,6 +75,7 @@ export function definePlugin(def: PluginDefinition): Plugin {
+     enabled: def.enabled ?? true,
+     onRequest: def.onRequest,
+     onRoute: def.onRoute,
++    onRouteResult: def.onRouteResult,
+     onResponse: def.onResponse,
+     onError: def.onError,
+   };
+diff --git a/src/sse/handlers/chat.ts b/src/sse/handlers/chat.ts
+index a4186acb..74f388c8 100644
+--- a/src/sse/handlers/chat.ts
++++ b/src/sse/handlers/chat.ts
+@@ -65,7 +65,11 @@ import { getPassthroughProviders } from "@omniroute/open-sse/config/providerRegi
+ import * as log from "../utils/logger";
+ import { checkAndRefreshToken } from "../services/tokenRefresh";
+ import { createHookContext, runHooks, initPreRequestRegistry } from "@/lib/middleware/registry";
+-import { runPluginOnRouteHook, buildPluginRouteCombo } from "./chat/pluginOnRoute";
++import {
++  runPluginOnRouteHook,
++  buildPluginRouteCombo,
++  emitPluginRouteResult,
++} from "./chat/pluginOnRoute";
+ import { rejectPeerRequest } from "@/shared/resilience/peerRouting";
+ import { isRuntimeProviderRetirementError } from "@/shared/constants/providerRetirement";
+ import { isCommonChatGptWebRetirementError } from "@/shared/constants/chatgptWebRetirement";
+@@ -1272,6 +1276,17 @@ async function handleChatImplementation(
+     }
+     comboPreselectedCredentials.clear();
+ 
++    // onRouteResult: tell the routing plugin how its list went (fire-and-forget).
++    if (pluginRouteCombo && combo?.id === pluginRouteCombo.id) {
++      emitPluginRouteResult({
++        requestId: reqId,
++        requestedModel: resolvedModelStr,
++        combo: pluginRouteCombo,
++        response,
++        log,
++      });
++    }
++
+     // ── Global Fallback Provider (#689) ────────────────────────────────────
+     // If combo exhausted all models, try the global fallback before giving up.
+     if (
+diff --git a/src/sse/handlers/chat/pluginOnRoute.ts b/src/sse/handlers/chat/pluginOnRoute.ts
+index aabea626..db6e6508 100644
+--- a/src/sse/handlers/chat/pluginOnRoute.ts
++++ b/src/sse/handlers/chat/pluginOnRoute.ts
+@@ -7,6 +7,8 @@
+  * Fail-open: no plugin, no answer, or any error leaves routing exactly as it was.
+  */
+ 
++import { createInvocationId, getComboTrace } from "@omniroute/open-sse/services/combo/decisionTrace.ts";
++
+ type LoggerLike =
+   | {
+       info?: (...args: unknown[]) => void;
+@@ -81,9 +83,54 @@ export function buildPluginRouteCombo(requestedModel: string, models: string[],
+     // The list IS the fallback order: hop to the next model at once. (OmniRoute already rotates
+     // accounts inside one attempt; the default same-model retry would add a 2 s stall per dead member.)
+     config: { maxRetries: 0 },
++    // lets chat.ts read this invocation's per-attempt outcomes back for onRouteResult
++    traceInvocationId: createInvocationId(),
+     isHidden: true,
+     isActive: true,
+     sortOrder: 0,
+     version: 1,
+   };
+ }
++
++/**
++ * onRouteResult: after the plugin-routed combo finished, tell the plugin how each dispatched target
++ * went (HTTP status + allowlisted kind, never an error body) and which targets OmniRoute skipped.
++ * Fire-and-forget: never awaited by the request, never throws.
++ */
++export function emitPluginRouteResult(args: {
++  requestId: string;
++  requestedModel: string;
++  combo: { traceInvocationId?: string; models: Array<{ model: string }> };
++  response: { status: number };
++  log?: LoggerLike;
++}): void {
++  void (async () => {
++    try {
++      const id = args.combo.traceInvocationId;
++      const trace = id ? getComboTrace(id) : null;
++      if (!trace) return;
++      const { runOnRouteResult } = await import("@/lib/plugins/hooks");
++      await runOnRouteResult({
++        requestId: args.requestId,
++        model: args.requestedModel,
++        status: args.response.status,
++        listed: args.combo.models.map((m) => m.model),
++        attempts: trace.outcomes.map((o) => ({
++          model: o.target,
++          ok: o.ok,
++          status: o.status,
++          kind: o.kind,
++          latencyMs: o.latencyMs,
++        })),
++        skipped: trace.decisions
++          .filter((d) => d.decision === "skipped_before_dispatch")
++          .map((d) => ({ model: d.target, reason: d.reason ?? "unknown" })),
++      });
++    } catch (err) {
++      args.log?.debug?.(
++        "PLUGIN",
++        `onRouteResult error (non-fatal): ${err instanceof Error ? err.message : String(err)}`
++      );
++    }
++  })();
++}
+diff --git a/tests/unit/plugins-onroute.test.ts b/tests/unit/plugins-onroute.test.ts
+index 7f5f18a5..06bc8c8d 100644
+--- a/tests/unit/plugins-onroute.test.ts
++++ b/tests/unit/plugins-onroute.test.ts
+@@ -9,8 +9,16 @@ import test from "node:test";
+ import assert from "node:assert/strict";
+ 
+ import { registerHook, runOnRoute, resetHooks } from "../../src/lib/plugins/hooks.ts";
++import {
++  startComboTrace,
++  recordComboDecision,
++  recordComboOutcome,
++  getComboTrace,
++  resetComboTraceStore,
++} from "../../open-sse/services/combo/decisionTrace.ts";
+ import {
+   buildPluginRouteCombo,
++  emitPluginRouteResult,
+   runPluginOnRouteHook,
+   MAX_PLUGIN_ROUTE_MODELS,
+ } from "../../src/sse/handlers/chat/pluginOnRoute.ts";
+@@ -19,6 +27,7 @@ const ctx = { requestId: "r1", body: { model: "paid" }, model: "paid" };
+ 
+ test.afterEach(() => {
+   resetHooks();
++  resetComboTraceStore();
+ });
+ 
+ test("runOnRoute returns null with no handlers", async () => {
+@@ -65,3 +74,50 @@ test("buildPluginRouteCombo has stored priority-combo shape, named after the req
+   assert.deepEqual(c.models.map((m) => m.model), ["ocpaid/opencode/glm-5.3", "ocfree/opencode/space-bunny-free"]);
+   assert.ok(c.models.every((m) => m.kind === "model" && m.id.startsWith("plugin-route-")));
+ });
++
++test("buildPluginRouteCombo carries a trace invocation id", () => {
++  const a = buildPluginRouteCombo("paid", ["p/a"], "r4");
++  const b = buildPluginRouteCombo("paid", ["p/a"], "r5");
++  assert.match(String(a.traceInvocationId), /^combo-/);
++  assert.notEqual(a.traceInvocationId, b.traceInvocationId);
++});
++
++test("recordComboOutcome stores status/kind per attempt, in order", () => {
++  startComboTrace("inv-1", { strategy: "priority", comboName: "free" });
++  recordComboOutcome("inv-1", { target: "ocfree/x", ok: false, status: 403, kind: "auth", latencyMs: 120 });
++  recordComboOutcome("inv-1", { target: "ocpv/y", ok: true, status: 200, kind: null, latencyMs: 900 });
++  const t = getComboTrace("inv-1");
++  assert.deepEqual(t?.outcomes.map((o) => [o.target, o.ok, o.status, o.kind]), [
++    ["ocfree/x", false, 403, "auth"],
++    ["ocpv/y", true, 200, null],
++  ]);
++  recordComboOutcome("unknown-invocation", { target: "z", ok: true, status: 200, kind: null, latencyMs: 1 }); // no throw
++});
++
++test("emitPluginRouteResult sends listed/attempts/skipped to onRouteResult handlers, fire-and-forget", async () => {
++  const combo = buildPluginRouteCombo("free", ["ocfree/x", "ocpv/y", "ocfree/z"], "r6");
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "free" });
++  recordComboDecision(id, { step: "plugin-route-3", target: "ocfree/z", decision: "skipped_before_dispatch", reason: "provider_cooldown" });
++  recordComboOutcome(id, { target: "ocfree/x", ok: false, status: 403, kind: "auth", latencyMs: 100 });
++  recordComboOutcome(id, { target: "ocpv/y", ok: true, status: 200, kind: null, latencyMs: 800 });
++  let got: any = null;
++  registerHook("onRouteResult", "p", (payload: unknown) => { got = payload; }, 1);
++  emitPluginRouteResult({ requestId: "r6", requestedModel: "free", combo, response: { status: 200 } });
++  for (let i = 0; i < 20 && !got; i++) await new Promise((r) => setTimeout(r, 5));
++  assert.equal(got.requestId, "r6");
++  assert.equal(got.model, "free");
++  assert.equal(got.status, 200);
++  assert.deepEqual(got.listed, ["ocfree/x", "ocpv/y", "ocfree/z"]);
++  assert.deepEqual(got.attempts.map((a: any) => [a.model, a.ok, a.status, a.kind]), [["ocfree/x", false, 403, "auth"], ["ocpv/y", true, 200, null]]);
++  assert.deepEqual(got.skipped, [{ model: "ocfree/z", reason: "provider_cooldown" }]);
++});
++
++test("emitPluginRouteResult swallows a throwing handler and a missing trace", async () => {
++  const combo = buildPluginRouteCombo("free", ["p/a"], "r7");
++  registerHook("onRouteResult", "boom", () => { throw new Error("x"); }, 1);
++  assert.doesNotThrow(() => emitPluginRouteResult({ requestId: "r7", requestedModel: "free", combo, response: { status: 502 } })); // no trace yet
++  startComboTrace(String(combo.traceInvocationId), { strategy: "priority", comboName: "free" });
++  assert.doesNotThrow(() => emitPluginRouteResult({ requestId: "r7", requestedModel: "free", combo, response: { status: 502 } }));
++  await new Promise((r) => setTimeout(r, 30));
++});
+diff --git a/tests/unit/plugins-welcome-banner-e2e.test.ts b/tests/unit/plugins-welcome-banner-e2e.test.ts
+index 9ceef37d..33c6b982 100644
+--- a/tests/unit/plugins-welcome-banner-e2e.test.ts
++++ b/tests/unit/plugins-welcome-banner-e2e.test.ts
+@@ -321,6 +321,7 @@ test("plugin hooks system", async (t) => {
+       "onRequest",
+       // jev-router patch: pre-resolution routing hook (runOnRoute, called from chat.ts)
+       "onRoute",
++      "onRouteResult",
+       "onResponse",
+       "onError",
+       "onInstall",
+-- 
+2.56.0
+

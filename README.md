@@ -4,7 +4,7 @@ An OmniRoute plugin that picks the model for `free` / `paid` requests, plus the 
 
 - `jev-router-spec.md` — the design (v2.0), test results and open items.
 - `plugin/` — the plugin (`onRoute` hook): `policy.example.json` → copy to `policy.json` (git-ignored; order, facts, denylist, listing sources, with your own hosts and key path), eligibility, list builder, decision log. `node --test plugin/test/`; `node plugin/check.mjs` prints the pools against the live listings.
-- `patches/` — `git format-patch` output against upstream OmniRoute (adds the `onRoute` hook). The only change to OmniRoute.
+- `patches/` — `git format-patch` output against upstream OmniRoute: `0001` adds the `onRoute` hook (the plugin picks the model list), `0002` adds the one-way `onRouteResult` hook (per-attempt outcomes, so the plugin can see failures and demote failing models). The only changes to OmniRoute.
 - `scripts/` — `latest-upstream-tag.sh`, `apply-patches.sh` (drops a patch upstream already has; exit 3 on conflict), `build-image.sh <tag> [--push]`.
 - `.github/workflows/build.yml` — daily: newest upstream tag → patch → plugin tests → amd64 `runner-web` image → `ghcr.io/<owner>/omniroute:<ver>-jev<rev>` with provenance and SBOM. Conflict → issue; previous image stays live.
 - `deploy/docker-compose.example.yml` — production compose, digest-pinned, plugin dir mounted.
