@@ -19,7 +19,10 @@ services:
       - OMNIROUTE_PLUGINS_DIR=/app/plugins          # where the jev-router plugin lives (register once: POST /api/plugins {"path":"/app/plugins/jev-router"})
     volumes:
       - ./data:/app/data
-      - ./plugins:/app/plugins                        # = a checkout/copy of this repo's plugin/ dir as ./plugins/jev-router (policy.json hot-reloads)
+      - ./plugins:/app/plugins                        # OmniRoute's own install dir: it creates ./plugins/jev-router here (policy.json there hot-reloads)
+      - ./plugin-src:/app/plugin-src:ro               # install SOURCE = copy of this repo's plugin/ as ./plugin-src/jev-router + your policy.json.
+                                                      # Install with POST /api/plugins {"path":"/app/plugin-src/jev-router"} (or the plugin_install MCP tool).
+                                                      # NEVER install from /app/plugins/jev-router: install() deletes the destination first, so source == destination wipes the plugin.
       # listing-source key for policy.json (key_file/key_var), read-only; the plugin cannot see container env vars
       - /path/to/oc-paid-proxy.env:/path/to/oc-paid-proxy.env:ro   # same path as policy.json key_file
     mem_limit: 6g
