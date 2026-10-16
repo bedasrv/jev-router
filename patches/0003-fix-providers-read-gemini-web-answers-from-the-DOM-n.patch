@@ -1,0 +1,577 @@
+From cddc90273b30713a798ee83bd448277dc87f08ee Mon Sep 17 00:00:00 2001
+From: jev-router <jev-router@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 22:32:36 +0700
+Subject: [PATCH] fix(providers): read gemini-web answers from the DOM, not the
+ dead StreamGenerate URL match
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Gemini's current web build (boq-gemini-web-uiserver_20261015.13_p0, Argon era)
+no longer serves the reply on a response URL containing "StreamGenerate": the
+generation rides opaque batchexecute/RPC channels whose bodies are no plaintext
+wrb.fr frames either. The executor's page.on("response") listener therefore
+never matches, waits out its 30s race, and returns 502 "No response from Gemini"
+on every request (upstream #10751, #16575 — both closed waiting for exactly this
+capture; a signed-in headless session answers normally while no StreamGenerate
+request fires at all).
+
+Replace the network sniffing with a DOM reader: poll the last
+model-response-text block until it loses processing-state-visible, the Stop
+button is gone, and the text is stable across two polls, with the caller's
+abort signal honored each poll and a 120s cap. Transport-agnostic: survives
+rpcid renames and response encryption. Extracted as a pure, unit-testable
+function (readGeminiResponseFromDom/collectGeminiDomState); existing fakes
+updated to the new contract, regression tests added for the polling rules.
+---
+ open-sse/executors/gemini-web.ts              | 159 +++++++++++++++---
+ .../gemini-web-cookie-rotation-7676.test.ts   |  26 +--
+ .../unit/gemini-web-image-retirement.test.ts  |  12 +-
+ .../unit/gemini-web-tool-calling-7286.test.ts |   2 +
+ tests/unit/gemini-web.test.ts                 | 148 +++++++++++++++-
+ ...e-13381-gemini-web-model-selection.test.ts |  19 ++-
+ 6 files changed, 310 insertions(+), 56 deletions(-)
+
+diff --git a/open-sse/executors/gemini-web.ts b/open-sse/executors/gemini-web.ts
+index 5bd4efd7..0c4e9c76 100644
+--- a/open-sse/executors/gemini-web.ts
++++ b/open-sse/executors/gemini-web.ts
+@@ -9,8 +9,15 @@
+  * Method: Playwright browser automation
+  *
+  * Note: Streaming is pseudo-streaming — waits for full Gemini response then
+- * sends as single SSE chunk. Gemini's StreamGenerate endpoint returns complete
+- * responses, not chunked streams.
++ * sends as single SSE chunk.
++ *
++ * Answer capture (#16575): the current Gemini web build
++ * (boq_gemini-web-uiserver_20261015.13_p0, Argon era) no longer serves the reply
++ * on a response URL containing "StreamGenerate" — the generation rides opaque
++ * `batchexecute`/RPC channels whose payloads are not the plaintext wrb.fr frames
++ * parseStreamResponse expects. The executor therefore reads the rendered answer
++ * from the DOM (readGeminiResponseFromDom) instead of sniffing network
++ * responses, which is agnostic to whatever transport Google renames next.
+  */
+ 
+ import { BaseExecutor, type ExecuteInput } from "./base.ts";
+@@ -328,6 +335,122 @@ export function parseStreamResponse(raw: string): string {
+   return lastText;
+ }
+ 
++// ─── DOM response reader (#16575) ───────────────────────────────────────────
++//
++// Since the Argon-era frontend build, Gemini's web UI renders the answer in the
++// DOM while the actual bytes travel over channels this executor can no longer
++// identify by URL (see the module header). Reading the rendered answer is
++// transport-agnostic: it survives rpcid renames, response encryption, and
++// whatever the frontend migrates to next.
++//
++// Completion detection combines two live signals plus text stability:
++//   1. the last `model-response-text` block lost its `processing-state-visible`
++//      state (Gemini's own "still generating" marker),
++//   2. the "Stop response" button is no longer visible,
++//   3. the block's text stopped changing across two consecutive polls.
++
++/** Custom element wrapping one rendered assistant answer. */
++export const GEMINI_RESPONSE_SELECTOR = "model-response-text";
++/** Class Gemini puts on that block while the answer is still streaming. */
++export const GEMINI_PROCESSING_CLASS = "processing-state-visible";
++/** aria-label substring of the button rendered only while generating. */
++export const GEMINI_STOP_LABEL_NEEDLE = "stop response";
++
++const GEMINI_DOM_POLL_MS = 750;
++const GEMINI_DOM_STABLE_POLLS = 2;
++/** Generous cap: normal answers settle in seconds; a hung generation must not hang forever. */
++const GEMINI_DOM_MAX_WAIT_MS = 120_000;
++
++export interface GeminiDomState {
++  /** innerText of every answer block, in DOM order. */
++  responses: string[];
++  /** true while any answer block is still marked as processing. */
++  processing: boolean;
++  /** true while the Stop-response button is rendered and visible. */
++  stopVisible: boolean;
++}
++
++/**
++ * Runs inside the browser page. Kept dependency-free (no closures) so it can be
++ * serialized through `page.evaluate` and stubbed in unit tests.
++ */
++export function collectGeminiDomState(
++  selector: string,
++  processingClass: string,
++  stopLabelNeedle: string,
++  doc: Document = (globalThis as { document?: Document }).document as Document
++): GeminiDomState {
++  const blocks = Array.from(doc.querySelectorAll(selector)) as HTMLElement[];
++  const responses = blocks.map((b) => (b.innerText || "").trim());
++  const processing = blocks.some((b) => b.classList.contains(processingClass));
++  let stopVisible = false;
++  for (const button of Array.from(doc.querySelectorAll("button"))) {
++    const label = (button.getAttribute("aria-label") || "").toLowerCase();
++    if (label.includes(stopLabelNeedle)) {
++      stopVisible = !!(button as HTMLElement).offsetParent;
++      break;
++    }
++  }
++  return { responses, processing, stopVisible };
++}
++
++/** Minimal surface of a Playwright page this reader needs — kept structural so tests can stub it. */
++export interface GeminiDomPage {
++  evaluate: (fn: (...args: never[]) => unknown, ...args: unknown[]) => Promise<unknown>;
++}
++
++export interface GeminiDomReaderOptions {
++  pollMs?: number;
++  stablePolls?: number;
++  maxWaitMs?: number;
++  /** Checked every poll; when it fires the reader stops waiting and returns what it has. */
++  isAborted?: () => boolean;
++}
++
++/** Macrotask sleep — a microtask-only await chain would starve abort/event timers. */
++function sleep(ms: number): Promise<void> {
++  return new Promise((resolve) => setTimeout(resolve, ms));
++}
++
++/**
++ * Wait for Gemini's answer to render and settle, returning its text.
++ * Returns the last (partial) answer text if the wait budget expires mid-generation,
++ * or "" when no answer block ever appeared (executor maps that to its 502 contract).
++ */
++export async function readGeminiResponseFromDom(
++  page: GeminiDomPage,
++  opts: GeminiDomReaderOptions = {}
++): Promise<string> {
++  const pollMs = opts.pollMs ?? GEMINI_DOM_POLL_MS;
++  const stablePolls = opts.stablePolls ?? GEMINI_DOM_STABLE_POLLS;
++  const maxWaitMs = opts.maxWaitMs ?? GEMINI_DOM_MAX_WAIT_MS;
++  const deadline = Date.now() + maxWaitMs;
++
++  let stable = 0;
++  let lastText = "";
++
++  while (Date.now() < deadline) {
++    if (opts.isAborted?.()) break;
++    const state = (await page.evaluate(
++      collectGeminiDomState as unknown as (...args: never[]) => unknown,
++      GEMINI_RESPONSE_SELECTOR,
++      GEMINI_PROCESSING_CLASS,
++      GEMINI_STOP_LABEL_NEEDLE
++    )) as GeminiDomState;
++    const current = state.responses[state.responses.length - 1] ?? "";
++
++    if (current && !state.processing && !state.stopVisible) {
++      stable += 1;
++      if (stable >= stablePolls) return current;
++    } else {
++      stable = 0;
++    }
++    lastText = current;
++    await sleep(pollMs);
++  }
++  return lastText.trim();
++}
++
+ function readCredentialString(value: unknown): string {
+   if (typeof value !== "string") return "";
+   const trimmed = value.trim();
+@@ -591,27 +714,6 @@ export class GeminiWebExecutor extends BaseExecutor {
+ 
+       const page = await context.newPage();
+ 
+-      // Capture first StreamGenerate response
+-      let responseText = "";
+-      let captured = false;
+-      const responsePromise = new Promise<void>((resolve) => {
+-        page.on("response", async (resp: any) => {
+-          if (!resp.url().includes("StreamGenerate")) return;
+-          if (captured) return;
+-          // Resolve even if reading the body throws, so the flow falls through
+-          // to the "No response from Gemini" 502 instead of burning the full
+-          // wait window.
+-          captured = true;
+-          try {
+-            const raw = await resp.text();
+-            responseText = parseStreamResponse(raw);
+-          } catch {
+-            /* ignore */
+-          }
+-          resolve();
+-        });
+-      });
+-
+       await page.goto(GEMINI_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
+       if (signal?.aborted) {
+         throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
+@@ -700,11 +802,18 @@ export class GeminiWebExecutor extends BaseExecutor {
+       await page.waitForTimeout(300);
+       await page.keyboard.press("Enter");
+ 
+-      await Promise.race([responsePromise, page.waitForTimeout(30000)]);
+       if (signal?.aborted) {
+         throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
+       }
+ 
++      // #16575: the answer is only reliably observable in the rendered DOM now;
++      // the old StreamGenerate URL match no longer fires on the current build.
++      const responseText = await readGeminiResponseFromDom(page, {
++        isAborted: () => signal?.aborted ?? false,
++      });
++      if (signal?.aborted) {
++        throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
++      }
+       if (!responseText) {
+         return {
+           response: new Response(JSON.stringify({ error: "No response from Gemini" }), {
+@@ -735,7 +844,7 @@ export class GeminiWebExecutor extends BaseExecutor {
+ 
+       if (stream) {
+         // Pseudo-streaming: send complete response as single SSE chunk
+-        // Gemini's StreamGenerate returns complete responses, not chunked streams
++        // (the answer is read from the DOM once rendering settles — see #16575)
+         const encoder = new TextEncoder();
+         const readable = new ReadableStream(
+           {
+diff --git a/tests/unit/gemini-web-cookie-rotation-7676.test.ts b/tests/unit/gemini-web-cookie-rotation-7676.test.ts
+index a6020aa1..ef9bea9f 100644
+--- a/tests/unit/gemini-web-cookie-rotation-7676.test.ts
++++ b/tests/unit/gemini-web-cookie-rotation-7676.test.ts
+@@ -27,33 +27,13 @@ test("#7676: GeminiWebExecutor persists rotated __Secure-1PSIDTS/__Secure-1PSIDC
+         addCookies: async () => {},
+         cookies: async () => rotatedJarCookies,
+         newPage: async () => ({
+-          on: (
+-            event: string,
+-            handler: (resp: { url: () => string; text: () => Promise<string> }) => void
+-          ) => {
+-            if (event === "response") {
+-              const body =
+-                ")]}'\n" +
+-                "30\n" +
+-                JSON.stringify([
+-                  [
+-                    "wrb.fr",
+-                    null,
+-                    JSON.stringify([null, null, null, null, [[null, ["hello back"]]]]),
+-                  ],
+-                ]) +
+-                "\n";
+-              handler({
+-                url: () =>
+-                  "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
+-                text: async () => body,
+-              });
+-            }
+-          },
++          on: () => {},
+           goto: async () => {},
+           waitForTimeout: async () => {},
+           waitForSelector: async () => ({ click: async () => {} }),
+           keyboard: { type: async () => {}, insertText: async () => {}, press: async () => {} },
++          // #16575: answer capture is DOM-based now — render the answer, already settled
++          evaluate: async () => ({ responses: ["hello back"], processing: false, stopVisible: false }),
+         }),
+       }),
+       close: async () => {},
+diff --git a/tests/unit/gemini-web-image-retirement.test.ts b/tests/unit/gemini-web-image-retirement.test.ts
+index 7e8d63ac..6210ee15 100644
+--- a/tests/unit/gemini-web-image-retirement.test.ts
++++ b/tests/unit/gemini-web-image-retirement.test.ts
+@@ -6,7 +6,7 @@ const { getAllImageModels, getImageProvider, parseImageModel } =
+   await import("../../open-sse/config/imageRegistry.ts");
+ const { handleImageGeneration } = await import("../../open-sse/handlers/imageGeneration.ts");
+ const geminiWebExecutorModule = await import("../../open-sse/executors/gemini-web.ts");
+-const { GeminiWebExecutor } = geminiWebExecutorModule;
++const { GeminiWebExecutor, parseStreamResponse } = geminiWebExecutorModule;
+ const { getExecutor, hasSpecializedExecutor } = await import("../../open-sse/executors/index.ts");
+ const { REGISTRY } = await import("../../open-sse/config/providerRegistry.ts");
+ 
+@@ -68,6 +68,12 @@ test("Gemini Web executor treats the retired image-mode extension as ordinary ch
+             waitDurations.push(duration);
+           },
+           waitForSelector: async () => ({ click: async () => {} }),
++          // #16575: answer capture is DOM-based now — render the frame's parsed text
++          evaluate: async () => ({
++            responses: [parseStreamResponse(raw)],
++            processing: false,
++            stopVisible: false,
++          }),
+           keyboard: { type: async () => {}, insertText: async () => {}, press: async () => {} },
+         }),
+       }),
+@@ -94,8 +100,10 @@ test("Gemini Web executor treats the retired image-mode extension as ordinary ch
+       (json.choices as Array<{ message: { content: string } }>)[0].message.content,
+       "standard chat reply"
+     );
++    // #16575: answer capture is DOM-based now — the retired image-mode 90s wait and
++    // the old 30s StreamGenerate race are both gone; the reader polls the DOM instead.
+     assert.equal(waitDurations.includes(90_000), false);
+-    assert.equal(waitDurations.includes(30_000), true);
++    assert.equal(waitDurations.includes(30_000), false);
+   } finally {
+     playwright.chromium.launch = originalLaunch;
+   }
+diff --git a/tests/unit/gemini-web-tool-calling-7286.test.ts b/tests/unit/gemini-web-tool-calling-7286.test.ts
+index 2c198601..32a86988 100644
+--- a/tests/unit/gemini-web-tool-calling-7286.test.ts
++++ b/tests/unit/gemini-web-tool-calling-7286.test.ts
+@@ -210,6 +210,8 @@ async function withMockedGeminiBrowser<T>(
+           goto: async () => {},
+           waitForTimeout: async () => {},
+           waitForSelector: async () => ({ click: async () => {} }),
++          // #16575: answer capture is DOM-based now — render the parsed answer text
++          evaluate: async () => ({ responses: [responseText], processing: false, stopVisible: false }),
+           keyboard: {
+             type: async (text: string) => {
+               calls.push("type");
+diff --git a/tests/unit/gemini-web.test.ts b/tests/unit/gemini-web.test.ts
+index 67c444b2..62798493 100644
+--- a/tests/unit/gemini-web.test.ts
++++ b/tests/unit/gemini-web.test.ts
+@@ -109,6 +109,7 @@ test("Normalizes a bare __Secure-1PSID value before adding browser cookies", asy
+   playwright.chromium.launch = async () =>
+     ({
+       newContext: async () => ({
++        close: async () => {},
+         addCookies: async (cookies: Array<{ name: string; value: string }>) => {
+           addedCookies = cookies;
+         },
+@@ -119,6 +120,8 @@ test("Normalizes a bare __Secure-1PSID value before adding browser cookies", asy
+           waitForSelector: async () => ({
+             click: async () => {},
+           }),
++          // #16575: answer capture is DOM-based now — the fake page renders nothing
++          evaluate: async () => ({ responses: [], processing: false, stopVisible: false }),
+           keyboard: {
+             type: async () => {},
+             insertText: async () => {},
+@@ -140,7 +143,11 @@ test("Normalizes a bare __Secure-1PSID value before adding browser cookies", asy
+       log: null,
+     });
+ 
+-    assert.equal(result.response.status, 502, "fake page intentionally returns no Gemini response");
++    // #16575: the fake page renders no answer, so the DOM reader waits out the
++    // caller's 5s abort signal; execute() maps the abort to the terminal 400 path.
++    assert.equal(result.response.status, 400, "aborted wait must not surface as a retryable 5xx");
++    const json = (await result.response.json()) as any;
++    assert.ok(typeof json.error === "string" && json.error.length > 0);
+     assert.equal(addedCookies.length, 1);
+     assert.equal(addedCookies[0].name, "__Secure-1PSID");
+     assert.equal(addedCookies[0].value, "raw-psid-value");
+@@ -287,3 +294,142 @@ test("parseStreamResponse ignores wrb.fr lines whose first entry is not an array
+   const raw = `)]}'\n10\n${JSON.stringify(["wrb.fr", null, "[]"])}`;
+   assert.equal(parseStreamResponse(raw), "");
+ });
++
++// ─── #16575: DOM response reader (StreamGenerate URL match is dead) ──────────
++//
++// Gemini's current web build (Argon era, boq-gemini-web-uiserver_20261015.13_p0)
++// renders the answer in the DOM while the bytes travel over opaque
++// batchexecute/RPC channels that carry no "StreamGenerate" in the URL and no
++// plaintext wrb.fr frames in the body. The executor must therefore read the
++// rendered answer instead of sniffing network responses — these tests pin the
++// reader's polling contract so the failure mode (30s wait → 502 "No response
++// from Gemini") cannot silently return.
++
++const {
++  readGeminiResponseFromDom,
++  collectGeminiDomState,
++} = await import("../../open-sse/executors/gemini-web.ts");
++
++interface FakeState {
++  responses: string[];
++  processing: boolean;
++  stopVisible: boolean;
++}
++
++/** Fake Playwright page: replays a scripted sequence of DOM states, one per poll. */
++function fakePage(states: Partial<FakeState>[]) {
++  const polls: string[] = [];
++  let i = 0;
++  return {
++    page: {
++      evaluate: async (_fn: unknown, selector: string) => {
++        polls.push(selector);
++        const scripted = states[Math.min(i, states.length - 1)];
++        i += 1;
++        return {
++          responses: scripted.responses ?? [],
++          processing: scripted.processing ?? false,
++          stopVisible: scripted.stopVisible ?? false,
++        };
++      },
++      waitForTimeout: async () => {},
++    },
++    pollCount: () => polls.length,
++  };
++}
++
++test("#16575: returns the answer once generation finished and text is stable", async () => {
++  const { page, pollCount } = fakePage([
++    { responses: [""], processing: true, stopVisible: true },
++    { responses: ["Hello"], processing: true, stopVisible: true },
++    { responses: ["Hello!"], processing: false, stopVisible: false },
++    { responses: ["Hello!"], processing: false, stopVisible: false },
++  ]);
++  const text = await readGeminiResponseFromDom(page, { pollMs: 1, stablePolls: 2 });
++  assert.equal(text, "Hello!");
++  assert.ok(pollCount() >= 3, "must not answer before two settled polls");
++});
++
++test("#16575: keeps waiting while the response block is still processing-state-visible", async () => {
++  const { page } = fakePage([
++    { responses: ["partial"], processing: true, stopVisible: true },
++    { responses: ["partial answer"], processing: true, stopVisible: true },
++    { responses: ["final answer"], processing: false, stopVisible: false },
++    { responses: ["final answer"], processing: false, stopVisible: false },
++  ]);
++  const text = await readGeminiResponseFromDom(page, { pollMs: 1, stablePolls: 2 });
++  assert.equal(text, "final answer");
++});
++
++test("#16575: keeps waiting while the Stop response button is still visible", async () => {
++  const { page } = fakePage([
++    { responses: ["answer"], processing: false, stopVisible: true },
++    { responses: ["answer"], processing: false, stopVisible: true },
++    { responses: ["answer"], processing: false, stopVisible: false },
++    { responses: ["answer"], processing: false, stopVisible: false },
++  ]);
++  const text = await readGeminiResponseFromDom(page, { pollMs: 1, stablePolls: 2 });
++  assert.equal(text, "answer");
++});
++
++test("#16575: returns the LAST answer block, not a stale earlier one", async () => {
++  const { page } = fakePage([
++    { responses: ["first answer", "second answer"], processing: false, stopVisible: false },
++    { responses: ["first answer", "second answer"], processing: false, stopVisible: false },
++  ]);
++  const text = await readGeminiResponseFromDom(page, { pollMs: 1, stablePolls: 2 });
++  assert.equal(text, "second answer");
++});
++
++test("#16575: returns empty string when no answer block ever renders (executor maps to 502)", async () => {
++  const { page } = fakePage([{ responses: [], processing: false, stopVisible: false }]);
++  const text = await readGeminiResponseFromDom(page, { pollMs: 1, maxWaitMs: 5 });
++  assert.equal(text, "");
++});
++
++test("#16575: falls back to the partial answer when the wait budget expires mid-generation", async () => {
++  const { page } = fakePage([{ responses: ["partial ans"], processing: true, stopVisible: true }]);
++  const text = await readGeminiResponseFromDom(page, { pollMs: 1, maxWaitMs: 10 });
++  assert.equal(text, "partial ans");
++});
++
++test("#16575: collectGeminiDomState extracts blocks, processing state and stop-button visibility", () => {
++  const makeBlock = (innerText: string, processing: boolean) => {
++    const el = {
++      innerText,
++      classList: { contains: (c: string) => processing && c === "processing-state-visible" },
++    };
++    return el as never;
++  };
++  const stopButton = {
++    getAttribute: (a: string) => (a === "aria-label" ? "Stop response" : null),
++    offsetParent: {},
++  } as never;
++  const doc = {
++    querySelectorAll: (sel: string) => (sel === "model-response-text" ? [makeBlock("first", false), makeBlock("second", true)] : [stopButton]),
++  } as never;
++  const state = collectGeminiDomState(
++    "model-response-text",
++    "processing-state-visible",
++    "stop response",
++    doc
++  );
++  assert.deepEqual(state.responses, ["first", "second"]);
++  assert.equal(state.processing, true);
++  assert.equal(state.stopVisible, true);
++});
++
++test("#16575: stops polling once the caller's abort signal fires", async () => {
++  const controller = new AbortController();
++  const { page } = fakePage([
++    { responses: ["half ans"], processing: true, stopVisible: true },
++  ]);
++  const promise = readGeminiResponseFromDom(page, {
++    pollMs: 1,
++    maxWaitMs: 5000,
++    isAborted: () => controller.signal.aborted,
++  });
++  controller.abort();
++  const text = await promise;
++  assert.equal(text, "half ans", "returns the partial text, does not keep polling");
++});
+diff --git a/tests/unit/issue-13381-gemini-web-model-selection.test.ts b/tests/unit/issue-13381-gemini-web-model-selection.test.ts
+index a769cb76..ceccbc18 100644
+--- a/tests/unit/issue-13381-gemini-web-model-selection.test.ts
++++ b/tests/unit/issue-13381-gemini-web-model-selection.test.ts
+@@ -56,6 +56,7 @@ function makeFakePlaywright(calls: Call[], script: PageScript = {}) {
+           calls.push({ fn: "addCookies", args: [cookies] });
+         },
+         cookies: async () => [],
++        close: async () => {},
+         newPage: async () => ({
+           on: (event: string) => {
+             calls.push({ fn: "page.on", args: [event] });
+@@ -84,6 +85,8 @@ function makeFakePlaywright(calls: Call[], script: PageScript = {}) {
+               textContent: async () => entry.text ?? null,
+             };
+           },
++          // #16575: answer capture is DOM-based now
++          evaluate: async () => ({ responses: [], processing: false, stopVisible: false }),
+           keyboard: {
+             type: async (text: string, opts2: unknown) => {
+               calls.push({ fn: "keyboard.type", args: [text, opts2] });
+@@ -158,7 +161,9 @@ test(
+         "executor still never selects the requested Gemini UI mode"
+     );
+ 
+-    assert.equal(runA.status, 502, "the default model proceeds to the (unanswered) prompt");
++    // #16575: the fake page renders no answer, so the DOM reader waits out the
++    // caller's 5s abort signal; execute() maps the abort to the terminal 400 path.
++    assert.equal(runA.status, 400, "the default model proceeds to the (unanswered) prompt");
+     assert.equal(
+       runB.status,
+       400,
+@@ -193,10 +198,12 @@ test("#13381: a confirmed model-mode read-back lets the request proceed to the p
+     },
+   });
+ 
++  // #16575: DOM reader waits out the 5s abort on the answer-less fake page; the
++  // point of this test is the automation trace, not the terminal status code.
+   assert.equal(
+     status,
+-    502,
+-    "a CONFIRMED mode switch must proceed to the (unanswered-by-the-fake-page) prompt, not 400"
++    400,
++    "a CONFIRMED mode switch must proceed to the (unanswered-by-the-fake-page) prompt, not fail closed"
+   );
+   assert.ok(
+     calls.some((c) => c.fn === "mode.click"),
+@@ -262,7 +269,8 @@ test("#13381: Extended Thinking is attempted and, once confirmed, the request pr
+     { reasoning_effort: "high" }
+   );
+ 
+-  assert.equal(status, 502, "a CONFIRMED Extended Thinking switch must proceed to the prompt");
++  // #16575: the answer-less fake page waits out the 5s abort (terminal 400), not 502
++  assert.equal(status, 400, "a CONFIRMED Extended Thinking switch must proceed to the prompt");
+   assert.ok(calls.some((c) => c.fn === "mode.click"));
+ });
+ 
+@@ -291,9 +299,10 @@ test("#13381: reasoning_effort none/minimal never triggers the Extended Thinking
+       {},
+       { reasoning_effort: effort }
+     );
++    // #16575: the answer-less fake page waits out the 5s abort (terminal 400), not 502
+     assert.equal(
+       status,
+-      502,
++      400,
+       `effort="${effort}" must reach the ordinary (unanswered) prompt path`
+     );
+     assert.equal(
+-- 
+2.56.0
+
