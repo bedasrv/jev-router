@@ -1,4 +1,4 @@
-From cddc90273b30713a798ee83bd448277dc87f08ee Mon Sep 17 00:00:00 2001
+From 500ea3516a482b343c1efdd643c9635cef26b97a Mon Sep 17 00:00:00 2001
 From: jev-router <jev-router@users.noreply.github.com>
 Date: Fri, 16 Oct 2026 22:32:36 +0700
 Subject: [PATCH] fix(providers): read gemini-web answers from the DOM, not the
@@ -17,23 +17,32 @@ capture; a signed-in headless session answers normally while no StreamGenerate
 request fires at all).
 
 Replace the network sniffing with a DOM reader: poll the last
-model-response-text block until it loses processing-state-visible, the Stop
-button is gone, and the text is stable across two polls, with the caller's
-abort signal honored each poll and a 120s cap. Transport-agnostic: survives
-rpcid renames and response encryption. Extracted as a pure, unit-testable
-function (readGeminiResponseFromDom/collectGeminiDomState); existing fakes
-updated to the new contract, regression tests added for the polling rules.
+model-response-text block until it loses processing-state-visible, the
+thinking-dots/pending-response placeholders are gone, the Stop button is gone,
+and the text is stable across two polls, with the caller's abort signal
+honored each poll and a 120s cap. Transport-agnostic: survives rpcid renames
+and response encryption.
+
+Follow-up fixes found by live testing against a signed-in account (2026-10-16):
+- page.evaluate takes exactly ONE argument (the multi-arg call threw
+  "Too many arguments" -> every request 500'd)
+- Enter no longer submits the composer under automation; the send button
+  (aria-label "Send message") does — click it, fall back to Enter
+
+Extracted as pure, unit-testable functions (collectGeminiDomState,
+clickGeminiSendButtonInPage); existing fakes updated to the new contract,
+regression tests added for the polling rules and the single-arg/click paths.
 ---
- open-sse/executors/gemini-web.ts              | 159 +++++++++++++++---
+ open-sse/executors/gemini-web.ts              | 217 +++++++++++++++---
  .../gemini-web-cookie-rotation-7676.test.ts   |  26 +--
  .../unit/gemini-web-image-retirement.test.ts  |  12 +-
  .../unit/gemini-web-tool-calling-7286.test.ts |   2 +
- tests/unit/gemini-web.test.ts                 | 148 +++++++++++++++-
- ...e-13381-gemini-web-model-selection.test.ts |  19 ++-
- 6 files changed, 310 insertions(+), 56 deletions(-)
+ tests/unit/gemini-web.test.ts                 | 217 +++++++++++++++++-
+ ...e-13381-gemini-web-model-selection.test.ts |  19 +-
+ 6 files changed, 436 insertions(+), 57 deletions(-)
 
 diff --git a/open-sse/executors/gemini-web.ts b/open-sse/executors/gemini-web.ts
-index 5bd4efd7..0c4e9c76 100644
+index 5bd4efd7..75f5778b 100644
 --- a/open-sse/executors/gemini-web.ts
 +++ b/open-sse/executors/gemini-web.ts
 @@ -9,8 +9,15 @@
@@ -54,7 +63,7 @@ index 5bd4efd7..0c4e9c76 100644
   */
  
  import { BaseExecutor, type ExecuteInput } from "./base.ts";
-@@ -328,6 +335,122 @@ export function parseStreamResponse(raw: string): string {
+@@ -328,6 +335,168 @@ export function parseStreamResponse(raw: string): string {
    return lastText;
  }
  
@@ -91,35 +100,79 @@ index 5bd4efd7..0c4e9c76 100644
 +  processing: boolean;
 +  /** true while the Stop-response button is rendered and visible. */
 +  stopVisible: boolean;
++  /** true while the thinking-dots/pending-response placeholders are still on screen. */
++  pending: boolean;
 +}
 +
 +/**
 + * Runs inside the browser page. Kept dependency-free (no closures) so it can be
-+ * serialized through `page.evaluate` and stubbed in unit tests.
++ * serialized through `page.evaluate` and stubbed in unit tests. Playwright's
++ * evaluate() passes at most one argument, hence the single options object.
 + */
 +export function collectGeminiDomState(
-+  selector: string,
-+  processingClass: string,
-+  stopLabelNeedle: string,
++  opts: { selector: string; processingClass: string; stopLabelNeedle: string },
 +  doc: Document = (globalThis as { document?: Document }).document as Document
 +): GeminiDomState {
-+  const blocks = Array.from(doc.querySelectorAll(selector)) as HTMLElement[];
++  const blocks = Array.from(doc.querySelectorAll(opts.selector)) as HTMLElement[];
 +  const responses = blocks.map((b) => (b.innerText || "").trim());
-+  const processing = blocks.some((b) => b.classList.contains(processingClass));
++  const processing = blocks.some((b) => b.classList.contains(opts.processingClass));
 +  let stopVisible = false;
 +  for (const button of Array.from(doc.querySelectorAll("button"))) {
 +    const label = (button.getAttribute("aria-label") || "").toLowerCase();
-+    if (label.includes(stopLabelNeedle)) {
++    if (label.includes(opts.stopLabelNeedle)) {
 +      stopVisible = !!(button as HTMLElement).offsetParent;
 +      break;
 +    }
 +  }
-+  return { responses, processing, stopVisible };
++  // Gemini renders thinking-dots-animation / pending-response while the answer
++  // is still being generated; both disappear once the answer is in the DOM.
++  const pending = [".thinking-dots-animation", "pending-response"].some((sel) =>
++    Array.from(doc.querySelectorAll(sel)).some((el) => !!(el as HTMLElement).offsetParent)
++  );
++  return { responses, processing, stopVisible, pending };
 +}
 +
 +/** Minimal surface of a Playwright page this reader needs — kept structural so tests can stub it. */
 +export interface GeminiDomPage {
 +  evaluate: (fn: (...args: never[]) => unknown, ...args: unknown[]) => Promise<unknown>;
++}
++
++/** aria-label of the composer's submit button in the current Gemini web UI. */
++export const GEMINI_SEND_BUTTON_LABEL = "send message";
++
++/**
++ * In-page half of clickGeminiSendButton (see there). Kept as a plain function
++ * with an injectable document so unit tests can drive it without a browser.
++ */
++export function clickGeminiSendButtonInPage(
++  needle: string,
++  doc: Document = (globalThis as { document?: Document }).document as Document
++): boolean {
++  const buttons = Array.from(doc.querySelectorAll("button"));
++  const send = buttons.find((b) =>
++    (b.getAttribute("aria-label") || "").toLowerCase().includes(needle)
++  );
++  if (!send) return false;
++  (send as HTMLElement).click();
++  return true;
++}
++
++/**
++ * Submit the typed prompt via the composer's send button.
++ *
++ * #16575 follow-up (2026-10-16): the Enter key stopped submitting in the current
++ * Gemini web build under automation — the optimistic user bubble renders, the
++ * Stop button flashes, but no generation ever starts and no answer block appears.
++ * Clicking the send button (aria-label "Send message") submits reliably. Returns
++ * false when no send button is present so the caller can fall back to Enter.
++ */
++export async function clickGeminiSendButton(page: {
++  evaluate: (fn: (...args: never[]) => unknown, ...args: never[]) => Promise<unknown>;
++}): Promise<boolean> {
++  return (await page.evaluate(
++    clickGeminiSendButtonInPage as unknown as (...args: never[]) => unknown,
++    GEMINI_SEND_BUTTON_LABEL
++  )) as boolean;
 +}
 +
 +export interface GeminiDomReaderOptions {
@@ -156,13 +209,15 @@ index 5bd4efd7..0c4e9c76 100644
 +    if (opts.isAborted?.()) break;
 +    const state = (await page.evaluate(
 +      collectGeminiDomState as unknown as (...args: never[]) => unknown,
-+      GEMINI_RESPONSE_SELECTOR,
-+      GEMINI_PROCESSING_CLASS,
-+      GEMINI_STOP_LABEL_NEEDLE
++      {
++        selector: GEMINI_RESPONSE_SELECTOR,
++        processingClass: GEMINI_PROCESSING_CLASS,
++        stopLabelNeedle: GEMINI_STOP_LABEL_NEEDLE,
++      }
 +    )) as GeminiDomState;
 +    const current = state.responses[state.responses.length - 1] ?? "";
 +
-+    if (current && !state.processing && !state.stopVisible) {
++    if (current && !state.processing && !state.stopVisible && !state.pending) {
 +      stable += 1;
 +      if (stable >= stablePolls) return current;
 +    } else {
@@ -177,7 +232,7 @@ index 5bd4efd7..0c4e9c76 100644
  function readCredentialString(value: unknown): string {
    if (typeof value !== "string") return "";
    const trimmed = value.trim();
-@@ -591,27 +714,6 @@ export class GeminiWebExecutor extends BaseExecutor {
+@@ -591,27 +760,6 @@ export class GeminiWebExecutor extends BaseExecutor {
  
        const page = await context.newPage();
  
@@ -205,9 +260,24 @@ index 5bd4efd7..0c4e9c76 100644
        await page.goto(GEMINI_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
        if (signal?.aborted) {
          throw signal.reason instanceof Error ? signal.reason : new Error("Request aborted");
-@@ -700,11 +802,18 @@ export class GeminiWebExecutor extends BaseExecutor {
+@@ -696,15 +844,32 @@ export class GeminiWebExecutor extends BaseExecutor {
+       // composer's Enter-submits-the-message handler before this function's
+       // own explicit Enter below. It also removes the fixed 10ms/char typing
+       // cost that made long prompts race the 30s response-wait timeout.
++      if (process.env.GWEB_DEBUG) {
++        const ed = await page.$(".ql-editor, [contenteditable='true']");
++        const desc = ed ? await ed.evaluate((e: Element) => e.tagName + "|" + (e.className || "").toString().slice(0, 40)) : "NONE";
++        console.log("[gweb-debug] editor:", desc, "| url:", page.url());
++      }
+       await page.keyboard.insertText(prompt);
        await page.waitForTimeout(300);
-       await page.keyboard.press("Enter");
+-      await page.keyboard.press("Enter");
++      // #16575 follow-up: Enter no longer submits under automation — the send
++      // button does. Fall back to Enter when the button cannot be found.
++      const sentViaButton = await clickGeminiSendButton(page);
++      if (!sentViaButton) {
++        await page.keyboard.press("Enter");
++      }
  
 -      await Promise.race([responsePromise, page.waitForTimeout(30000)]);
        if (signal?.aborted) {
@@ -225,7 +295,7 @@ index 5bd4efd7..0c4e9c76 100644
        if (!responseText) {
          return {
            response: new Response(JSON.stringify({ error: "No response from Gemini" }), {
-@@ -735,7 +844,7 @@ export class GeminiWebExecutor extends BaseExecutor {
+@@ -735,7 +900,7 @@ export class GeminiWebExecutor extends BaseExecutor {
  
        if (stream) {
          // Pseudo-streaming: send complete response as single SSE chunk
@@ -327,7 +397,7 @@ index 2c198601..32a86988 100644
              type: async (text: string) => {
                calls.push("type");
 diff --git a/tests/unit/gemini-web.test.ts b/tests/unit/gemini-web.test.ts
-index 67c444b2..62798493 100644
+index 67c444b2..bb99055e 100644
 --- a/tests/unit/gemini-web.test.ts
 +++ b/tests/unit/gemini-web.test.ts
 @@ -109,6 +109,7 @@ test("Normalizes a bare __Secure-1PSID value before adding browser cookies", asy
@@ -360,7 +430,7 @@ index 67c444b2..62798493 100644
      assert.equal(addedCookies.length, 1);
      assert.equal(addedCookies[0].name, "__Secure-1PSID");
      assert.equal(addedCookies[0].value, "raw-psid-value");
-@@ -287,3 +294,142 @@ test("parseStreamResponse ignores wrb.fr lines whose first entry is not an array
+@@ -287,3 +294,211 @@ test("parseStreamResponse ignores wrb.fr lines whose first entry is not an array
    const raw = `)]}'\n10\n${JSON.stringify(["wrb.fr", null, "[]"])}`;
    assert.equal(parseStreamResponse(raw), "");
  });
@@ -378,6 +448,7 @@ index 67c444b2..62798493 100644
 +const {
 +  readGeminiResponseFromDom,
 +  collectGeminiDomState,
++  clickGeminiSendButtonInPage,
 +} = await import("../../open-sse/executors/gemini-web.ts");
 +
 +interface FakeState {
@@ -388,23 +459,31 @@ index 67c444b2..62798493 100644
 +
 +/** Fake Playwright page: replays a scripted sequence of DOM states, one per poll. */
 +function fakePage(states: Partial<FakeState>[]) {
-+  const polls: string[] = [];
++  const calls: Array<unknown[]> = [];
 +  let i = 0;
 +  return {
 +    page: {
-+      evaluate: async (_fn: unknown, selector: string) => {
-+        polls.push(selector);
++      evaluate: async (...args: unknown[]) => {
++        calls.push(args);
++        const argCount = args.length; // Playwright allows exactly ONE evaluate argument
++        const opts = args[1] as { selector?: string } | undefined;
++        if (argCount !== 2 || !opts || typeof opts.selector !== "string") {
++          throw new Error(
++            "Too many arguments. If you need to pass more than 1 argument to the function wrap them in an object."
++          );
++        }
 +        const scripted = states[Math.min(i, states.length - 1)];
 +        i += 1;
 +        return {
 +          responses: scripted.responses ?? [],
 +          processing: scripted.processing ?? false,
 +          stopVisible: scripted.stopVisible ?? false,
++          pending: scripted.pending ?? false,
 +        };
 +      },
 +      waitForTimeout: async () => {},
 +    },
-+    pollCount: () => polls.length,
++    pollCount: () => calls.length,
 +  };
 +}
 +
@@ -442,6 +521,17 @@ index 67c444b2..62798493 100644
 +  assert.equal(text, "answer");
 +});
 +
++test("#16575: keeps waiting while the thinking-dots/pending-response placeholders are on screen", async () => {
++  const { page } = fakePage([
++    { responses: ["partial"], processing: false, stopVisible: false, pending: true },
++    { responses: ["partial answer"], processing: false, stopVisible: false, pending: true },
++    { responses: ["final answer"], processing: false, stopVisible: false, pending: false },
++    { responses: ["final answer"], processing: false, stopVisible: false, pending: false },
++  ]);
++  const text = await readGeminiResponseFromDom(page, { pollMs: 1, stablePolls: 2 });
++  assert.equal(text, "final answer");
++});
++
 +test("#16575: returns the LAST answer block, not a stale earlier one", async () => {
 +  const { page } = fakePage([
 +    { responses: ["first answer", "second answer"], processing: false, stopVisible: false },
@@ -475,18 +565,23 @@ index 67c444b2..62798493 100644
 +    getAttribute: (a: string) => (a === "aria-label" ? "Stop response" : null),
 +    offsetParent: {},
 +  } as never;
++  const dots = { offsetParent: {} } as never;
 +  const doc = {
-+    querySelectorAll: (sel: string) => (sel === "model-response-text" ? [makeBlock("first", false), makeBlock("second", true)] : [stopButton]),
++    querySelectorAll: (sel: string) => {
++      if (sel === "model-response-text") return [makeBlock("first", false), makeBlock("second", true)];
++      if (sel === "button") return [stopButton];
++      if (sel === ".thinking-dots-animation") return [dots];
++      return [];
++    },
 +  } as never;
 +  const state = collectGeminiDomState(
-+    "model-response-text",
-+    "processing-state-visible",
-+    "stop response",
++    { selector: "model-response-text", processingClass: "processing-state-visible", stopLabelNeedle: "stop response" },
 +    doc
 +  );
 +  assert.deepEqual(state.responses, ["first", "second"]);
 +  assert.equal(state.processing, true);
 +  assert.equal(state.stopVisible, true);
++  assert.equal(state.pending, true);
 +});
 +
 +test("#16575: stops polling once the caller's abort signal fires", async () => {
@@ -502,6 +597,50 @@ index 67c444b2..62798493 100644
 +  controller.abort();
 +  const text = await promise;
 +  assert.equal(text, "half ans", "returns the partial text, does not keep polling");
++});
++
++test("#16575: clickGeminiSendButtonInPage clicks the labeled send button", () => {
++  let clicked = false;
++  const doc = {
++    querySelectorAll: (sel: string) =>
++      sel === "button"
++        ? [
++            {
++              getAttribute: (a: string) => (a === "aria-label" ? "Send message" : null),
++              click: () => {
++                clicked = true;
++              },
++            },
++          ]
++        : [],
++  } as never;
++  const clickedIt = clickGeminiSendButtonInPage("send message", doc);
++  assert.equal(clickedIt, true);
++  assert.equal(clicked, true);
++});
++
++test("#16575: clickGeminiSendButtonInPage returns false when no send button exists (Enter fallback)", () => {
++  const doc = {
++    querySelectorAll: (sel: string) =>
++      sel === "button" ? [{ getAttribute: () => null, click: () => {} }] : [],
++  } as never;
++  assert.equal(clickGeminiSendButtonInPage("send message", doc), false);
++});
++
++test("#16575: clickGeminiSendButton routes the in-page click through page.evaluate with one argument", async () => {
++  const { clickGeminiSendButton } = await import("../../open-sse/executors/gemini-web.ts");
++  const seen: { args: unknown[]; arg: unknown } = { args: [], arg: undefined };
++  const page = {
++    evaluate: async (...args: unknown[]) => {
++      seen.args = args;
++      seen.arg = args[1];
++      return true;
++    },
++  };
++  const ok = await clickGeminiSendButton(page);
++  assert.equal(ok, true);
++  assert.equal(seen.args.length, 2, "page.evaluate takes exactly one argument");
++  assert.equal(seen.arg, "send message");
 +});
 diff --git a/tests/unit/issue-13381-gemini-web-model-selection.test.ts b/tests/unit/issue-13381-gemini-web-model-selection.test.ts
 index a769cb76..ceccbc18 100644
