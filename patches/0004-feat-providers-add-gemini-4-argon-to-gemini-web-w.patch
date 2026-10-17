@@ -1,0 +1,641 @@
+From ebfa1f486cf4b8e15b40aa2c777d9ab77564b1b7 Mon Sep 17 00:00:00 2001
+From: jev-router <jev-router@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 07:48:03 +0700
+Subject: [PATCH] feat(providers): add gemini-4-argon to gemini-web with
+ live-calibrated mode selection (#16573)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Argon is a real, selectable mode on Pro accounts (live menu: "4 Argon /
+Complex tasks") but was not advertised for gemini-web — the upstream PR is
+[defer], so requests for it died with unknown_model before ever reaching the
+UI. Adds the model to the gemini-web registry and the mode-selection map.
+
+The mode-selection selectors were UNVALIDATED guesses (they failed live:
+gemini-3.7-flash could never confirm its switch). Recalibrated against a live
+signed-in session (2026-10-16):
+- the picker is button[aria-label^="Open mode picker"] opening a gem-menu of
+  gem-menu-item[role="menuitem"] entries
+- item matching is regex on visible text, version-agnostic (the menu now
+  advertises 3.8 Flash / 3.5 Flash-Lite while the gweb ids remain
+  gemini-3.7-flash / gemini-3.1-flash-lite; the Flash pattern excludes
+  Flash-Lite explicitly)
+- read-back polls the picker's aria-label attribute until it confirms
+
+Also makes the selection flow stale-handle-proof: Angular detaches the picker
+button between query and click (elementHandle.click: Element is not attached
+to the DOM -> 500), so the toggle click re-queries and retries, and the
+indicator is re-queried each poll. All fail-closed paths (#13381) unchanged:
+no confirmation -> 400 unsupported_control_for_provider.
+
+Live smoke on a signed-in session: Argon mode switch confirmed (picker ->
+menu -> Argon -> aria-label verified -> prompt submitted). Full generation
+currently stalls Google-side under automation throttling (PENDING-RESPONSE
+never resolves) — same throttle that affects the other gweb models here, not
+specific to this change.
+
+Tests: 15 mode-selection tests (incl. argon confirmed/missing-item/mismatch),
+26 gemini-web unit tests, all gemini-web suites green; typecheck:core clean.
+---
+ .../providers/registry/gemini/web/index.ts    |   9 +
+ .../executors/gemini-web/modeSelection.ts     | 210 +++++++++++++++---
+ .../unit/gemini-web-image-retirement.test.ts  |   2 +-
+ .../unit/gemini-web-tool-calling-7286.test.ts |  22 +-
+ tests/unit/gemini-web.test.ts                 |   1 +
+ ...e-13381-gemini-web-model-selection.test.ts | 162 +++++++++++++-
+ 6 files changed, 356 insertions(+), 50 deletions(-)
+
+diff --git a/open-sse/config/providers/registry/gemini/web/index.ts b/open-sse/config/providers/registry/gemini/web/index.ts
+index 0e937378..2a73cc19 100644
+--- a/open-sse/config/providers/registry/gemini/web/index.ts
++++ b/open-sse/config/providers/registry/gemini/web/index.ts
+@@ -35,5 +35,14 @@ export const gemini_webProvider: RegistryEntry = {
+       toolCalling: false,
+       supportsReasoning: false,
+     },
++    // #16573: Argon is selectable in the live web UI's mode picker
++    // ("4 Argon / Complex tasks") on accounts that have it; mode selection is
++    // verified fail-closed in ./executors/gemini-web/modeSelection.ts.
++    {
++      id: "gemini-4-argon",
++      name: "Gemini 4 Argon",
++      toolCalling: false,
++      supportsReasoning: false,
++    },
+   ],
+ };
+diff --git a/open-sse/executors/gemini-web/modeSelection.ts b/open-sse/executors/gemini-web/modeSelection.ts
+index 3dcb96a1..88d4515b 100644
+--- a/open-sse/executors/gemini-web/modeSelection.ts
++++ b/open-sse/executors/gemini-web/modeSelection.ts
+@@ -16,19 +16,19 @@
+  * `gemini.google.com/app` already opens to (no interaction needed); every
+  * other advertised model requires a confirmed switch.
+  *
+- * ⚠️ SELECTOR SET IS UNVALIDATED. Every CSS selector below is a best-effort
+- * guess at Gemini's current DOM, not a value confirmed against a live
+- * account — this checkout has no live Gemini session and no way to inspect
+- * Google's current markup (which also changes without notice). That is fine
+- * BY DESIGN: `selectGeminiUiMode()` never trusts an unconfirmed guess. If a
+- * selector is wrong — the likely outcome until the mandatory live smoke in
+- * the PR is run and these values are corrected against the real DOM — the
+- * toggle/indicator lookup simply fails, the read-back does not confirm the
+- * requested mode, and the caller gets a clear 400
+- * (`unsupported_control_for_provider`) instead of a response silently
+- * labeled with a model/mode that never actually ran — the exact dishonesty
+- * #13381 reported. Update the selectors only after inspecting the real DOM
+- * on a live account, never from guesswork.
++ * Selectors below were CALIBRATED against a live signed-in session
++ * (2026-10-16, gemini.google.com/app): the mode picker is a
++ * `button[aria-label^="Open mode picker"]` that opens a `gem-menu` of
++ * `gem-menu-item[role="menuitem"]` entries ("3.5 Flash-Lite", "3.8 Flash",
++ * "3.1 Pro", "4 Argon", "Thinking level"). Item matching is regex-based on
++ * the visible text, so it survives Google's version renames (the menu now
++ * advertises 3.8 Flash / 3.5 Flash-Lite while the gweb ids remain
++ * gemini-3.7-flash / gemini-3.1-flash-lite).
++ *
++ * The read-back is unchanged in spirit: a click landing is never success —
++ * the active-mode indicator (the mode-picker button's aria-label) must
++ * confirm the switch, or the caller gets a fail-closed 400 (#13381). Update
++ * selectors only after inspecting the real DOM on a live account.
+  */
+ 
+ /** Reasons `selectGeminiUiMode`/`selectGeminiModel` can fail closed. */
+@@ -43,10 +43,30 @@ export interface GeminiWebModeDescriptor {
+    * UI interaction is attempted, nothing to confirm.
+    */
+   readonly isDefault: boolean;
+-  /** UNVALIDATED — opens/activates the control for this mode. Ignored when `isDefault`. */
++  /** Opens the control that lists the modes (the mode picker menu). Ignored when `isDefault`. */
+   readonly toggleSelector?: string;
+-  /** UNVALIDATED — element whose text proves which mode is now active. */
++  /**
++   * Presence check: the menu is open once this matches. Ignored when
++   * `menuItemPattern` is unset (single-click controls, e.g. Extended Thinking).
++   */
++  readonly menuPresenceSelector?: string;
++  /**
++   * Regex matched (in-page) against each menu item's innerText to pick the
++   * entry for this mode. Version-agnostic on purpose: the live menu labels
++   * carry Google's own versions ("3.8 Flash"), which the gweb ids do not.
++   */
++  readonly menuItemPattern?: string;
++  readonly menuItemPatternFlags?: string;
++  /** Selector for the menu items `menuItemPattern` is matched against. */
++  readonly menuItemSelector?: string;
++  /** Element whose text/attribute proves which mode is now active. */
+   readonly activeIndicatorSelector?: string;
++  /**
++   * Attribute to read on the indicator element (the live picker button
++   * exposes its state via `aria-label`, which neither textContent nor
++   * innerText returns). Falls back to text when unset.
++   */
++  readonly indicatorAttribute?: string;
+   /** Text the active-mode indicator must contain once the switch is confirmed. */
+   readonly expectedIndicatorPattern?: RegExp;
+ }
+@@ -58,25 +78,51 @@ export interface GeminiWebModeDescriptor {
+  * `unknown_model` (see `resolveGeminiModelMode`), which is the intended,
+  * honest behavior for a model this module cannot yet select.
+  */
++/** Live mode-picker button (aria-label: "Open mode picker, currently <mode>"). */
++export const GEMINI_MODE_PICKER_BUTTON_SELECTOR = 'button[aria-label^="Open mode picker"]';
++/** Live mode menu: `gem-menu` of `gem-menu-item[role="menuitem"]` entries. */
++export const GEMINI_MENU_ITEM_SELECTOR = 'gem-menu-item[role="menuitem"]';
++
+ export const GEMINI_WEB_MODEL_MODES: Readonly<Record<string, GeminiWebModeDescriptor>> = {
+   "gemini-3.1-pro": { id: "gemini-3.1-pro", isDefault: true },
+   "gemini-3.7-flash": {
+     id: "gemini-3.7-flash",
+     isDefault: false,
+-    toggleSelector:
+-      '[data-test-id="bard-mode-menu-button"], button[aria-haspopup="menu"][aria-label*="model" i]',
+-    activeIndicatorSelector:
+-      '[data-test-id="bard-mode-menu-button"] .mode-title, [data-test-id="bard-mode-menu-button"]',
+-    expectedIndicatorPattern: /\bflash\b(?!.*\blite\b)/i,
++    toggleSelector: GEMINI_MODE_PICKER_BUTTON_SELECTOR,
++    menuPresenceSelector: GEMINI_MENU_ITEM_SELECTOR,
++    menuItemSelector: GEMINI_MENU_ITEM_SELECTOR,
++    // "Flash" but not "Flash-Lite" — the menu lists both (version-agnostic)
++    menuItemPattern: "Flash(?!-Lite)",
++    menuItemPatternFlags: "i",
++    activeIndicatorSelector: GEMINI_MODE_PICKER_BUTTON_SELECTOR,
++    indicatorAttribute: "aria-label",
++    expectedIndicatorPattern: /flash(?!-lite)/i,
+   },
+   "gemini-3.1-flash-lite": {
+     id: "gemini-3.1-flash-lite",
+     isDefault: false,
+-    toggleSelector:
+-      '[data-test-id="bard-mode-menu-button"], button[aria-haspopup="menu"][aria-label*="model" i]',
+-    activeIndicatorSelector:
+-      '[data-test-id="bard-mode-menu-button"] .mode-title, [data-test-id="bard-mode-menu-button"]',
+-    expectedIndicatorPattern: /flash.*\blite\b/i,
++    toggleSelector: GEMINI_MODE_PICKER_BUTTON_SELECTOR,
++    menuPresenceSelector: GEMINI_MENU_ITEM_SELECTOR,
++    menuItemSelector: GEMINI_MENU_ITEM_SELECTOR,
++    menuItemPattern: "Flash-Lite",
++    menuItemPatternFlags: "i",
++    activeIndicatorSelector: GEMINI_MODE_PICKER_BUTTON_SELECTOR,
++    indicatorAttribute: "aria-label",
++    expectedIndicatorPattern: /flash-lite/i,
++  },
++  // #16573: Argon is a real, selectable mode on Pro accounts (live menu:
++  // "4 Argon / Complex tasks"). Same fail-closed read-back as every other mode.
++  "gemini-4-argon": {
++    id: "gemini-4-argon",
++    isDefault: false,
++    toggleSelector: GEMINI_MODE_PICKER_BUTTON_SELECTOR,
++    menuPresenceSelector: GEMINI_MENU_ITEM_SELECTOR,
++    menuItemSelector: GEMINI_MENU_ITEM_SELECTOR,
++    menuItemPattern: "Argon",
++    menuItemPatternFlags: "i",
++    activeIndicatorSelector: GEMINI_MODE_PICKER_BUTTON_SELECTOR,
++    indicatorAttribute: "aria-label",
++    expectedIndicatorPattern: /argon/i,
+   },
+ };
+ 
+@@ -105,6 +151,8 @@ export interface GeminiAutomationPage {
+     selector: string,
+     opts?: { timeout?: number }
+   ): Promise<GeminiAutomationElement | null>;
++  evaluate: (fn: (...args: never[]) => unknown, ...args: never[]) => Promise<unknown>;
++  waitForTimeout: (ms: number) => Promise<unknown>;
+ }
+ 
+ export interface GeminiModeSelectionResult {
+@@ -113,6 +161,24 @@ export interface GeminiModeSelectionResult {
+   descriptor?: GeminiWebModeDescriptor;
+ }
+ 
++/** Reads `attribute` off an element when set (aria-label lives there, not in textContent). */
++async function readIndicatorAttribute(
++  el: GeminiAutomationElement,
++  attribute: string
++): Promise<string | null> {
++  try {
++    const getter = (el as unknown as { getAttribute?: (a: string) => string | null })
++      .getAttribute;
++    if (typeof getter === "function") {
++      const value = await getter.call(el, attribute);
++      if (typeof value === "string") return value;
++    }
++  } catch {
++    // Unreadable is treated the same as "did not confirm" below — never a pass.
++  }
++  return null;
++}
++
+ async function readIndicatorText(el: GeminiAutomationElement): Promise<string | null> {
+   try {
+     if (typeof el.textContent === "function") {
+@@ -128,6 +194,29 @@ async function readIndicatorText(el: GeminiAutomationElement): Promise<string |
+   return null;
+ }
+ 
++/**
++ * In-page half of the menu-item click (see selectGeminiUiMode). Finds the first
++ * menu item whose innerText matches the pattern and clicks it. Kept as a plain
++ * function with an injectable document for unit tests; serialized through
++ * page.evaluate with exactly ONE argument (the options object).
++ */
++export function clickGeminiMenuItemInPage(
++  opts: { pattern: string; flags: string; itemSelector: string },
++  doc: Document = (globalThis as { document?: Document }).document as Document
++): boolean {
++  let re: RegExp;
++  try {
++    re = new RegExp(opts.pattern, opts.flags);
++  } catch {
++    return false;
++  }
++  const items = Array.from(doc.querySelectorAll(opts.itemSelector)) as HTMLElement[];
++  const target = items.find((item) => re.test((item.innerText || "").trim()));
++  if (!target) return false;
++  target.click();
++  return true;
++}
++
+ /**
+  * Try to switch the live Gemini Web page to `descriptor`'s mode, then READ
+  * BACK the active-mode indicator before reporting success. A click landing
+@@ -141,29 +230,78 @@ export async function selectGeminiUiMode(
+ ): Promise<GeminiModeSelectionResult> {
+   if (descriptor.isDefault) return { confirmed: true, descriptor };
+ 
+-  const { toggleSelector, activeIndicatorSelector, expectedIndicatorPattern } = descriptor;
++  const {
++    toggleSelector,
++    menuPresenceSelector,
++    menuItemPattern,
++    menuItemPatternFlags,
++    menuItemSelector,
++    activeIndicatorSelector,
++    indicatorAttribute,
++    expectedIndicatorPattern,
++  } = descriptor;
+   if (!toggleSelector || !activeIndicatorSelector || !expectedIndicatorPattern) {
+     return { confirmed: false, reason: "control_not_found", descriptor };
+   }
+ 
+-  const toggle = await page
+-    .waitForSelector(toggleSelector, { timeout: timeoutMs })
+-    .catch(() => null);
+-  if (!toggle) return { confirmed: false, reason: "control_not_found", descriptor };
++  // Angular re-renders the picker button between query and click
++  // ("elementHandle.click: Element is not attached to the DOM") — re-query and
++  // retry instead of trusting one handle.
++  let toggleClicked = false;
++  for (let attempt = 0; attempt < 3 && !toggleClicked; attempt++) {
++    const toggle = await page.waitForSelector(toggleSelector, { timeout: timeoutMs }).catch(() => null);
++    if (!toggle) return { confirmed: false, reason: "control_not_found", descriptor };
++    try {
++      await toggle.click();
++      toggleClicked = true;
++    } catch {
++      await page.waitForTimeout(100);
++    }
++  }
++  if (!toggleClicked) return { confirmed: false, reason: "control_not_found", descriptor };
+ 
+-  await toggle.click();
++  if (menuItemPattern) {
++    // Menu picker: wait for the menu, then click this mode's entry by pattern.
++    const menuSelector = menuPresenceSelector ?? menuItemSelector ?? GEMINI_MENU_ITEM_SELECTOR;
++    const menuOpen = await page.waitForSelector(menuSelector, { timeout: timeoutMs }).catch(() => null);
++    if (!menuOpen) return { confirmed: false, reason: "control_not_found", descriptor };
++
++    const clicked = (await page.evaluate(
++      clickGeminiMenuItemInPage as unknown as (...args: never[]) => unknown,
++      {
++        pattern: menuItemPattern,
++        flags: menuItemPatternFlags ?? "i",
++        itemSelector: menuItemSelector ?? GEMINI_MENU_ITEM_SELECTOR,
++      }
++    )) as boolean;
++    if (!clicked) return { confirmed: false, reason: "control_not_found", descriptor };
++  }
+ 
+   const indicator = await page
+     .waitForSelector(activeIndicatorSelector, { timeout: timeoutMs })
+     .catch(() => null);
+   if (!indicator) return { confirmed: false, reason: "indicator_not_found", descriptor };
+ 
+-  const text = await readIndicatorText(indicator);
+-  if (!text || !expectedIndicatorPattern.test(text)) {
+-    return { confirmed: false, reason: "indicator_mismatch", descriptor };
++  // Angular needs a tick to flip the picker's aria-label after the click —
++  // re-query the indicator each poll (the handle may detach) until the pattern
++  // confirms or the budget runs out.
++  const deadline = Date.now() + timeoutMs;
++  while (true) {
++    const el = await page
++      .waitForSelector(activeIndicatorSelector, { timeout: 250 })
++      .catch(() => null);
++    const text = el
++      ? indicatorAttribute
++        ? await readIndicatorAttribute(el, indicatorAttribute)
++        : await readIndicatorText(el)
++      : null;
++    if (text && expectedIndicatorPattern.test(text)) {
++      return { confirmed: true, descriptor };
++    }
++    if (Date.now() >= deadline) break;
++    await page.waitForTimeout(100);
+   }
+-
+-  return { confirmed: true, descriptor };
++  return { confirmed: false, reason: "indicator_mismatch", descriptor };
+ }
+ 
+ export function resolveGeminiModelMode(modelId: string): GeminiWebModeDescriptor | null {
+diff --git a/tests/unit/gemini-web-image-retirement.test.ts b/tests/unit/gemini-web-image-retirement.test.ts
+index 6210ee15..d51874af 100644
+--- a/tests/unit/gemini-web-image-retirement.test.ts
++++ b/tests/unit/gemini-web-image-retirement.test.ts
+@@ -125,7 +125,7 @@ test("Gemini Web chat and legitimate Gemini image providers remain available", a
+   assert.equal(REGISTRY["gemini-web"]?.executor, "gemini-web");
+   assert.deepEqual(
+     REGISTRY["gemini-web"]?.models.map(({ id }) => id),
+-    ["gemini-3.1-pro", "gemini-3.7-flash", "gemini-3.1-flash-lite"]
++    ["gemini-3.1-pro", "gemini-3.7-flash", "gemini-3.1-flash-lite", "gemini-4-argon"]
+   );
+ 
+   assert.deepEqual(parseImageModel("nano-banana"), {
+diff --git a/tests/unit/gemini-web-tool-calling-7286.test.ts b/tests/unit/gemini-web-tool-calling-7286.test.ts
+index 32a86988..052dbc69 100644
+--- a/tests/unit/gemini-web-tool-calling-7286.test.ts
++++ b/tests/unit/gemini-web-tool-calling-7286.test.ts
+@@ -210,8 +210,16 @@ async function withMockedGeminiBrowser<T>(
+           goto: async () => {},
+           waitForTimeout: async () => {},
+           waitForSelector: async () => ({ click: async () => {} }),
+-          // #16575: answer capture is DOM-based now — render the parsed answer text
+-          evaluate: async () => ({ responses: [responseText], processing: false, stopVisible: false }),
++          // #16575: answer capture is DOM-based now — render the parsed answer text.
++          // The send-button click rides the same evaluate channel: the needle
++          // argument ("send message") marks it and the fake renders the button.
++          evaluate: async (...args: unknown[]) => {
++            if (args[1] === "send message") {
++              calls.push("send.click");
++              return true;
++            }
++            return { responses: [responseText], processing: false, stopVisible: false, pending: false };
++          },
+           keyboard: {
+             type: async (text: string) => {
+               calls.push("type");
+@@ -318,8 +326,14 @@ test("#13380: the Playwright input uses an atomic insertText, not the per-keystr
+     assert.equal(typedPrompt.value, "multi\nline\nprompt");
+     // insertText dispatches one atomic `input` event instead of per-character
+     // keydown/keypress/keyup, so an embedded "\n" cannot fire the composer's
+-    // Enter-submits handler ahead of the executor's own explicit Enter below.
++    // Enter-submits handler ahead of the submit below. Submission goes through
++    // the send button (Enter no longer submits on the live UI — see #16575);
++    // Enter remains the fallback when no send button is found.
+     assert.ok(!calls.includes("type"), "must not use the per-keystroke type() input path");
+-    assert.deepEqual(calls, ["insertText", "press"], "insertText once, then Enter exactly once");
++    assert.deepEqual(
++      calls,
++      ["insertText", "send.click"],
++      "insertText once, then exactly one send-button click"
++    );
+   });
+ });
+diff --git a/tests/unit/gemini-web.test.ts b/tests/unit/gemini-web.test.ts
+index bb99055e..39f9e40c 100644
+--- a/tests/unit/gemini-web.test.ts
++++ b/tests/unit/gemini-web.test.ts
+@@ -181,6 +181,7 @@ test("Provider: gemini-web has correct models", async () => {
+       ["gemini-3.1-pro", "Gemini 3.1 Pro"],
+       ["gemini-3.7-flash", "Gemini 3.7 Flash"],
+       ["gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite"],
++      ["gemini-4-argon", "Gemini 4 Argon"],
+     ]
+   );
+ });
+diff --git a/tests/unit/issue-13381-gemini-web-model-selection.test.ts b/tests/unit/issue-13381-gemini-web-model-selection.test.ts
+index ceccbc18..c9ff9f9c 100644
+--- a/tests/unit/issue-13381-gemini-web-model-selection.test.ts
++++ b/tests/unit/issue-13381-gemini-web-model-selection.test.ts
+@@ -13,10 +13,9 @@
+ // and READ BACK before the executor proceeds — a confirmed match is required,
+ // or the request fails closed with 400 `unsupported_control_for_provider`
+ // rather than silently running the account default under the requested
+-// label. The mode-selection selectors themselves are UNVALIDATED (no live
+-// Gemini account/DOM access from this checkout) — see modeSelection.ts and
+-// the PR's "Live check" section. This suite proves the STRUCTURE: the
+-// confirmed path proceeds, the unconfirmed path never does.
++// label. The mode-selection selectors are calibrated against a live signed-in
++// session (2026-10-16 — see modeSelection.ts) — this suite proves the
++// STRUCTURE: the confirmed path proceeds, the unconfirmed path never does.
+ 
+ import test from "node:test";
+ import assert from "node:assert/strict";
+@@ -26,17 +25,22 @@ const { GEMINI_WEB_UNSUPPORTED_CONTROL_CODE } =
+   await import("../../open-sse/executors/gemini-web/capabilities.ts");
+ const { GEMINI_WEB_MODEL_MODES, GEMINI_WEB_EXTENDED_THINKING_MODE } =
+   await import("../../open-sse/executors/gemini-web/modeSelection.ts");
++const modeSelectionModule = await import("../../open-sse/executors/gemini-web/modeSelection.ts");
+ 
+ type Call = { fn: string; args: unknown[] };
+ 
+ interface SelectorScriptEntry {
+   found: boolean;
+   text?: string | null;
++  /** What getAttribute("aria-label") returns — the live read-back channel. */
++  ariaLabel?: string | null;
+ }
+ 
+ interface PageScript {
+   /** Keyed by the EXACT selector string the production descriptor uses. */
+   selectors?: Record<string, SelectorScriptEntry>;
++  /** Keyed by the descriptor's menuItemPattern — whether the in-page click finds the item. */
++  menuItems?: Record<string, boolean>;
+ }
+ 
+ /**
+@@ -83,10 +87,18 @@ function makeFakePlaywright(calls: Call[], script: PageScript = {}) {
+                 calls.push({ fn: "mode.click", args: [selector] });
+               },
+               textContent: async () => entry.text ?? null,
++              getAttribute: async (a: string) =>
++                a === "aria-label" ? entry.ariaLabel ?? null : null,
+             };
+           },
+-          // #16575: answer capture is DOM-based now
+-          evaluate: async () => ({ responses: [], processing: false, stopVisible: false }),
++          // #16575: answer capture is DOM-based; menu-item click goes through evaluate
++          evaluate: async (...args: unknown[]) => {
++            const opts = args[1] as { pattern?: string } | undefined;
++            if (opts && typeof opts.pattern === "string") {
++              return script.menuItems?.[opts.pattern] ?? false;
++            }
++            return { responses: [], processing: false, stopVisible: false, pending: false };
++          },
+           keyboard: {
+             type: async (text: string, opts2: unknown) => {
+               calls.push({ fn: "keyboard.type", args: [text, opts2] });
+@@ -194,8 +206,13 @@ test("#13381: a confirmed model-mode read-back lets the request proceed to the p
+   const { status, calls } = await runWithFakePage("gemini-3.7-flash", {
+     selectors: {
+       [descriptor.toggleSelector!]: { found: true },
+-      [descriptor.activeIndicatorSelector!]: { found: true, text: "Gemini 3.7 Flash" },
++      [descriptor.menuPresenceSelector!]: { found: true },
++      [descriptor.activeIndicatorSelector!]: {
++        found: true,
++        ariaLabel: "Open mode picker, currently Flash",
++      },
+     },
++    menuItems: { [descriptor.menuItemPattern!]: true },
+   });
+ 
+   // #16575: DOM reader waits out the 5s abort on the answer-less fake page; the
+@@ -235,9 +252,14 @@ test("#13381: a mismatched read-back fails closed with 400, not a silent success
+   const { status, body } = await runWithFakePage("gemini-3.1-flash-lite", {
+     selectors: {
+       [descriptor.toggleSelector!]: { found: true },
+-      // Toggle clicked, but the UI actually shows a different mode than requested.
+-      [descriptor.activeIndicatorSelector!]: { found: true, text: "Gemini 3.1 Pro" },
++      [descriptor.menuPresenceSelector!]: { found: true },
++      // Item clicked, but the UI actually shows a different mode than requested.
++      [descriptor.activeIndicatorSelector!]: {
++        found: true,
++        ariaLabel: "Open mode picker, currently Pro",
++      },
+     },
++    menuItems: { [descriptor.menuItemPattern!]: true },
+   });
+ 
+   assert.notEqual(status, 200);
+@@ -312,3 +334,125 @@ test("#13381: reasoning_effort none/minimal never triggers the Extended Thinking
+     );
+   }
+ });
++
++// ─── #16573: gemini-4-argon — live-calibrated mode picker ───────────────────
++
++test("#16573: gemini-4-argon is advertised with a mode-selection descriptor", () => {
++  const descriptor = GEMINI_WEB_MODEL_MODES["gemini-4-argon"];
++  assert.ok(descriptor, "gemini-4-argon must have a mode descriptor");
++  assert.equal(descriptor.isDefault, false);
++  assert.ok(descriptor.toggleSelector);
++  assert.ok(descriptor.menuItemPattern);
++  assert.ok(descriptor.activeIndicatorSelector);
++  assert.equal(descriptor.indicatorAttribute, "aria-label");
++});
++
++test("#16573: a confirmed Argon mode switch proceeds to the prompt", async () => {
++  const descriptor = GEMINI_WEB_MODEL_MODES["gemini-4-argon"];
++  const { status, calls } = await runWithFakePage("gemini-4-argon", {
++    selectors: {
++      [descriptor.toggleSelector!]: { found: true },
++      [descriptor.menuPresenceSelector!]: { found: true },
++      [descriptor.activeIndicatorSelector!]: {
++        found: true,
++        ariaLabel: "Open mode picker, currently Argon",
++      },
++    },
++    menuItems: { [descriptor.menuItemPattern!]: true },
++  });
++
++  // Abort-terminal 400 (the answer-less fake page waits out the 5s abort);
++  // the point is the automation trace: mode picked, then the editor reached.
++  assert.equal(status, 400);
++  assert.ok(calls.some((c) => c.fn === "mode.click"), "the mode picker must have been opened");
++  assert.ok(calls.some((c) => c.fn === "editor.click"), "must reach the prompt editor once confirmed");
++});
++
++test("#16573: Argon fails closed when the menu item is missing (no silent account default)", async () => {
++  const descriptor = GEMINI_WEB_MODEL_MODES["gemini-4-argon"];
++  const { status, body, calls } = await runWithFakePage("gemini-4-argon", {
++    selectors: {
++      [descriptor.toggleSelector!]: { found: true },
++      [descriptor.menuPresenceSelector!]: { found: true },
++      [descriptor.activeIndicatorSelector!]: { found: true, ariaLabel: "Open mode picker, currently Flash" },
++    },
++    // menu item absent (account without Argon entitlement)
++  });
++
++  assert.equal(status, 400);
++  assert.equal((body as ErrorBodyLike).error.code, GEMINI_WEB_UNSUPPORTED_CONTROL_CODE);
++  assert.equal(
++    calls.some((c) => c.fn === "editor.click"),
++    false,
++    "an unconfirmed mode must never reach the prompt editor"
++  );
++});
++
++test("#16573: Argon fails closed when the read-back still shows the old mode", async () => {
++  const descriptor = GEMINI_WEB_MODEL_MODES["gemini-4-argon"];
++  const { status, body } = await runWithFakePage("gemini-4-argon", {
++    selectors: {
++      [descriptor.toggleSelector!]: { found: true },
++      [descriptor.menuPresenceSelector!]: { found: true },
++      [descriptor.activeIndicatorSelector!]: {
++        found: true,
++        ariaLabel: "Open mode picker, currently Flash",
++      },
++    },
++    menuItems: { [descriptor.menuItemPattern!]: true },
++  });
++
++  assert.equal(status, 400);
++  assert.equal((body as ErrorBodyLike).error.code, GEMINI_WEB_UNSUPPORTED_CONTROL_CODE);
++});
++
++// ─── menu-item click: in-page unit level ────────────────────────────────────
++
++test("#16573: clickGeminiMenuItemInPage clicks the pattern-matching item", () => {
++  const { clickGeminiMenuItemInPage } = modeSelectionModule;
++  let clicked: string | null = null;
++  const doc = {
++    querySelectorAll: (sel: string) =>
++      sel === 'gem-menu-item[role="menuitem"]'
++        ? [
++            { innerText: "3.5 Flash-Lite\nFastest answers", click: () => { clicked = "lite"; } },
++            { innerText: "3.8 Flash\nAll-around help", click: () => { clicked = "flash"; } },
++            { innerText: "4 Argon\nComplex tasks", click: () => { clicked = "argon"; } },
++          ]
++        : [],
++  } as never;
++  const ok = clickGeminiMenuItemInPage(
++    { pattern: "Argon", flags: "i", itemSelector: 'gem-menu-item[role="menuitem"]' },
++    doc
++  );
++  assert.equal(ok, true);
++  assert.equal(clicked, "argon");
++});
++
++test("#16573: Flash pattern matches Flash but not Flash-Lite", () => {
++  const { clickGeminiMenuItemInPage } = modeSelectionModule;
++  let clicked: string | null = null;
++  const doc = {
++    querySelectorAll: () => [
++      { innerText: "3.5 Flash-Lite\nFastest answers", click: () => { clicked = "lite"; } },
++      { innerText: "3.8 Flash\nAll-around help", click: () => { clicked = "flash"; } },
++    ],
++  } as never;
++  const ok = clickGeminiMenuItemInPage(
++    { pattern: "Flash(?!-Lite)", flags: "i", itemSelector: "x" },
++    doc
++  );
++  assert.equal(ok, true);
++  assert.equal(clicked, "flash", "must not select Flash-Lite when Flash was requested");
++});
++
++test("#16573: clickGeminiMenuItemInPage returns false when no item matches", () => {
++  const { clickGeminiMenuItemInPage } = modeSelectionModule;
++  const doc = {
++    querySelectorAll: () => [{ innerText: "3.8 Flash\nAll-around help", click: () => {} }],
++  } as never;
++  assert.equal(
++    clickGeminiMenuItemInPage({ pattern: "Argon", flags: "i", itemSelector: "x" }, doc),
++    false
++  );
++});
+-- 
+2.56.0
+
