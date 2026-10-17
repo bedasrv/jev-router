@@ -1,0 +1,423 @@
+From 821018f66193e60ee6861173fbb63cd006d08ad5 Mon Sep 17 00:00:00 2001
+From: jev-router <jev-router@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 09:10:15 +0700
+Subject: [PATCH] fix(providers): gemini-web mode selection must be
+ stale-handle-proof and self-contained in-page
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Live testing on the deployed build exposed two bugs in the mode-selection flow:
+
+1. ElementHandle clicks landed on detached nodes: Angular replaces the mode
+   picker during hydration, so a handle from before the click is dead by the
+   time click() executes — the menu never opens, intermittently (roughly every
+   other request under Docker load), surfacing as control_not_found.
+
+2. The in-page pollers referenced a module-scope sleep helper, which
+   Playwright cannot serialize into the page — page.evaluate threw
+   ReferenceError: sleepInPage is not defined inside the browser, failing
+   every mode switch with a 500.
+
+Rewrite the flow around self-contained in-page async pollers: wait-and-click
+the picker, wait-and-click the pattern-matching menu item, wait-and-read the
+aria-label indicator — all fresh-queried, all serializable, retried up to 3x.
+Fail-closed reasons preserved: menu item never lands -> control_not_found;
+item landed but never confirmed -> indicator_mismatch.
+
+Unit tests drive the pollers directly with stubbed documents; integration
+tests route the three evaluate shapes through the fake page. Verified live:
+Argon mode switch confirmed end-to-end on the signed-in account.
+---
+ .../executors/gemini-web/modeSelection.ts     | 203 ++++++++++--------
+ ...e-13381-gemini-web-model-selection.test.ts |  54 +++--
+ 2 files changed, 152 insertions(+), 105 deletions(-)
+
+diff --git a/open-sse/executors/gemini-web/modeSelection.ts b/open-sse/executors/gemini-web/modeSelection.ts
+index 76352a7f..40054bd4 100644
+--- a/open-sse/executors/gemini-web/modeSelection.ts
++++ b/open-sse/executors/gemini-web/modeSelection.ts
+@@ -152,7 +152,6 @@ export interface GeminiAutomationPage {
+     opts?: { timeout?: number }
+   ): Promise<GeminiAutomationElement | null>;
+   evaluate: (fn: (...args: never[]) => unknown, ...args: never[]) => Promise<unknown>;
+-  waitForTimeout: (ms: number) => Promise<unknown>;
+ }
+ 
+ export interface GeminiModeSelectionResult {
+@@ -161,60 +160,89 @@ export interface GeminiModeSelectionResult {
+   descriptor?: GeminiWebModeDescriptor;
+ }
+ 
+-/** Reads `attribute` off an element when set (aria-label lives there, not in textContent). */
+-async function readIndicatorAttribute(
+-  el: GeminiAutomationElement,
+-  attribute: string
+-): Promise<string | null> {
+-  try {
+-    const getter = (el as unknown as { getAttribute?: (a: string) => string | null })
+-      .getAttribute;
+-    if (typeof getter === "function") {
+-      const value = await getter.call(el, attribute);
+-      if (typeof value === "string") return value;
++/**
++ * In-page half of the mode-picker toggle click (see selectGeminiUiMode). Waits
++ * for the button to be present (Angular replaces it during hydration), then
++ * clicks the FRESH node — an ElementHandle from before hydration is detached
++ * by the time click() lands, which silently opened no menu. Async so it can
++ * poll inside the page. Injectable document keeps it unit-testable.
++ */
++export async function clickGeminiModePickerInPage(
++  opts: { buttonSelector: string; waitMs: number },
++  doc: Document = (globalThis as { document?: Document }).document as Document
++): Promise<boolean> {
++  const deadline = Date.now() + opts.waitMs;
++  while (Date.now() < deadline) {
++    const button = doc.querySelector(opts.buttonSelector) as HTMLElement | null;
++    if (button) {
++      button.click();
++      return true;
+     }
+-  } catch {
+-    // Unreadable is treated the same as "did not confirm" below — never a pass.
++    await new Promise((resolve) => setTimeout(resolve, 100));
+   }
+-  return null;
++  return doc.querySelector(opts.buttonSelector) !== null
++    ? (() => {
++        (doc.querySelector(opts.buttonSelector) as HTMLElement).click();
++        return true;
++      })()
++    : false;
+ }
+ 
+-async function readIndicatorText(el: GeminiAutomationElement): Promise<string | null> {
++/**
++ * In-page half of the menu-item click (see selectGeminiUiMode). Waits for a
++ * menu item whose innerText matches the pattern, then clicks it. The live menu
++ * can take several seconds to render its items after the picker opens, and the
++ * page also contains OTHER gem-menus (e.g. the thinking-level submenu), so a
++ * single-shot query is not enough. Async so it can poll inside the page.
++ */
++export async function clickGeminiMenuItemInPage(
++  opts: { pattern: string; flags: string; itemSelector: string; waitMs: number },
++  doc: Document = (globalThis as { document?: Document }).document as Document
++): Promise<boolean> {
++  let re: RegExp;
+   try {
+-    if (typeof el.textContent === "function") {
+-      const text = await el.textContent();
+-      if (typeof text === "string") return text;
+-    }
+-    if (typeof el.innerText === "function") {
+-      return await el.innerText();
+-    }
++    re = new RegExp(opts.pattern, opts.flags);
+   } catch {
+-    // Unreadable is treated the same as "did not confirm" below — never a pass.
++    return false;
++  }
++  const deadline = Date.now() + opts.waitMs;
++  while (Date.now() < deadline) {
++    const items = Array.from(doc.querySelectorAll(opts.itemSelector)) as HTMLElement[];
++    const target = items.find((item) => re.test((item.innerText || "").trim()));
++    if (target) {
++      target.click();
++      return true;
++    }
++    await new Promise((resolve) => setTimeout(resolve, 100));
+   }
+-  return null;
++  return false;
+ }
+ 
+ /**
+- * In-page half of the menu-item click (see selectGeminiUiMode). Finds the first
+- * menu item whose innerText matches the pattern and clicks it. Kept as a plain
+- * function with an injectable document for unit tests; serialized through
+- * page.evaluate with exactly ONE argument (the options object).
++ * In-page read of the active-mode indicator: polls the element's attribute
++ * (aria-label) until the pattern confirms. Async so the whole read-back is a
++ * single evaluate round-trip.
+  */
+-export function clickGeminiMenuItemInPage(
+-  opts: { pattern: string; flags: string; itemSelector: string },
++export async function readGeminiModeIndicatorInPage(
++  opts: { selector: string; attribute?: string | null; pattern: string; flags: string; waitMs: number },
+   doc: Document = (globalThis as { document?: Document }).document as Document
+-): boolean {
++): Promise<boolean> {
+   let re: RegExp;
+   try {
+     re = new RegExp(opts.pattern, opts.flags);
+   } catch {
+     return false;
+   }
+-  const items = Array.from(doc.querySelectorAll(opts.itemSelector)) as HTMLElement[];
+-  const target = items.find((item) => re.test((item.innerText || "").trim()));
+-  if (!target) return false;
+-  target.click();
+-  return true;
++  const deadline = Date.now() + opts.waitMs;
++  while (Date.now() < deadline) {
++    const el = doc.querySelector(opts.selector) as HTMLElement | null;
++    const value = opts.attribute
++      ? el?.getAttribute?.(opts.attribute) ?? null
++      : (el?.innerText ?? "").trim();
++    if (value && re.test(value)) return true;
++    await new Promise((resolve) => setTimeout(resolve, 100));
++  }
++  return false;
+ }
+ 
+ /**
+@@ -235,7 +263,6 @@ export async function selectGeminiUiMode(
+ 
+   const {
+     toggleSelector,
+-    menuPresenceSelector,
+     menuItemPattern,
+     menuItemPatternFlags,
+     menuItemSelector,
+@@ -247,64 +274,62 @@ export async function selectGeminiUiMode(
+     return { confirmed: false, reason: "control_not_found", descriptor };
+   }
+ 
+-  // Angular re-renders the picker button between query and click
+-  // ("elementHandle.click: Element is not attached to the DOM") — re-query and
+-  // retry instead of trusting one handle.
+-  let toggleClicked = false;
+-  for (let attempt = 0; attempt < 3 && !toggleClicked; attempt++) {
+-    const toggle = await page.waitForSelector(toggleSelector, { timeout: timeoutMs }).catch(() => null);
+-    if (!toggle) return { confirmed: false, reason: "control_not_found", descriptor };
+-    try {
+-      await toggle.click();
+-      toggleClicked = true;
+-    } catch {
+-      await page.waitForTimeout(100);
+-    }
+-  }
+-  if (!toggleClicked) return { confirmed: false, reason: "control_not_found", descriptor };
++  // Control presence (fail-closed "not found" when the picker is absent entirely)
++  const toggle = await page
++    .waitForSelector(toggleSelector, { timeout: timeoutMs })
++    .catch(() => null);
++  if (!toggle) return { confirmed: false, reason: "control_not_found", descriptor };
++
++  const itemSelector = menuItemSelector ?? GEMINI_MENU_ITEM_SELECTOR;
++
++  // All interaction runs in-page against freshly-queried nodes: Angular detaches
++  // and re-creates the picker during hydration, so ElementHandle clicks land on
++  // dead nodes and the menu never opens (observed intermittently under Docker
++  // load — roughly every other request). Up to 3 attempts of the whole
++  // open -> pick -> read-back cycle.
++  let pickedAtLeastOnce = false;
+ 
+-  if (menuItemPattern) {
+-    // Menu picker: wait for the menu, then click this mode's entry by pattern.
+-    const menuSelector = menuPresenceSelector ?? menuItemSelector ?? GEMINI_MENU_ITEM_SELECTOR;
+-    const menuOpen = await page.waitForSelector(menuSelector, { timeout: timeoutMs }).catch(() => null);
+-    if (!menuOpen) return { confirmed: false, reason: "control_not_found", descriptor };
++  for (let attempt = 1; attempt <= 3; attempt++) {
++    const opened = (await page.evaluate(
++      clickGeminiModePickerInPage as unknown as (...args: never[]) => unknown,
++      { buttonSelector: toggleSelector, waitMs: 3000 }
++    )) as boolean;
++    if (!opened) continue;
++
++    if (menuItemPattern) {
++      const picked = (await page.evaluate(
++        clickGeminiMenuItemInPage as unknown as (...args: never[]) => unknown,
++        {
++          pattern: menuItemPattern,
++          flags: menuItemPatternFlags ?? "i",
++          itemSelector,
++          waitMs: 5000,
++        }
++      )) as boolean;
++      if (!picked) continue;
++      pickedAtLeastOnce = true;
++    }
+ 
+-    const clicked = (await page.evaluate(
+-      clickGeminiMenuItemInPage as unknown as (...args: never[]) => unknown,
++    const confirmed = (await page.evaluate(
++      readGeminiModeIndicatorInPage as unknown as (...args: never[]) => unknown,
+       {
+-        pattern: menuItemPattern,
+-        flags: menuItemPatternFlags ?? "i",
+-        itemSelector: menuItemSelector ?? GEMINI_MENU_ITEM_SELECTOR,
++        selector: activeIndicatorSelector,
++        attribute: indicatorAttribute ?? null,
++        pattern: expectedIndicatorPattern.source,
++        flags: expectedIndicatorPattern.flags,
++        waitMs: timeoutMs,
+       }
+     )) as boolean;
+-    if (!clicked) return { confirmed: false, reason: "control_not_found", descriptor };
++    if (confirmed) return { confirmed: true, descriptor };
+   }
+ 
+-  const indicator = await page
+-    .waitForSelector(activeIndicatorSelector, { timeout: timeoutMs })
+-    .catch(() => null);
+-  if (!indicator) return { confirmed: false, reason: "indicator_not_found", descriptor };
+-
+-  // Angular needs a tick to flip the picker's aria-label after the click —
+-  // re-query the indicator each poll (the handle may detach) until the pattern
+-  // confirms or the budget runs out.
+-  const deadline = Date.now() + timeoutMs;
+-  while (true) {
+-    const el = await page
+-      .waitForSelector(activeIndicatorSelector, { timeout: 250 })
+-      .catch(() => null);
+-    const text = el
+-      ? indicatorAttribute
+-        ? await readIndicatorAttribute(el, indicatorAttribute)
+-        : await readIndicatorText(el)
+-      : null;
+-    if (text && expectedIndicatorPattern.test(text)) {
+-      return { confirmed: true, descriptor };
+-    }
+-    if (Date.now() >= deadline) break;
+-    await page.waitForTimeout(100);
+-  }
+-  return { confirmed: false, reason: "indicator_mismatch", descriptor };
++  // Menu item never landed -> the control itself was unusable; item landed but
++  // never confirmed -> read-back mismatch. Both fail closed (#13381).
++  return {
++    confirmed: false,
++    reason: menuItemPattern && !pickedAtLeastOnce ? "control_not_found" : "indicator_mismatch",
++    descriptor,
++  };
+ }
+ 
+ export function resolveGeminiModelMode(modelId: string): GeminiWebModeDescriptor | null {
+diff --git a/tests/unit/issue-13381-gemini-web-model-selection.test.ts b/tests/unit/issue-13381-gemini-web-model-selection.test.ts
+index c9ff9f9c..dea4a187 100644
+--- a/tests/unit/issue-13381-gemini-web-model-selection.test.ts
++++ b/tests/unit/issue-13381-gemini-web-model-selection.test.ts
+@@ -91,11 +91,27 @@ function makeFakePlaywright(calls: Call[], script: PageScript = {}) {
+                 a === "aria-label" ? entry.ariaLabel ?? null : null,
+             };
+           },
+-          // #16575: answer capture is DOM-based; menu-item click goes through evaluate
++          // All mode-selection interaction is in-page evaluate now (#16573):
++          // picker click, menu-item click, indicator read — plus the DOM reader.
+           evaluate: async (...args: unknown[]) => {
+-            const opts = args[1] as { pattern?: string } | undefined;
+-            if (opts && typeof opts.pattern === "string") {
+-              return script.menuItems?.[opts.pattern] ?? false;
++            const opts = args[1] as Record<string, unknown> | undefined;
++            if (opts && typeof opts.buttonSelector === "string") {
++              return !!script.selectors?.[opts.buttonSelector as string]?.found;
++            }
++            if (opts && typeof opts.pattern === "string" && typeof opts.itemSelector === "string") {
++              return script.menuItems?.[opts.pattern as string] ?? false;
++            }
++            if (opts && typeof opts.selector === "string" && typeof opts.pattern === "string") {
++              // indicator read: attribute (aria-label) when set, else textContent
++              const entry = script.selectors?.[opts.selector as string];
++              if (!entry?.found) return false;
++              try {
++                const re = new RegExp(opts.pattern as string, (opts.flags as string) || "i");
++                const attr = (opts.attribute as string | undefined) ?? null;
++                return re.test(String((attr ? entry.ariaLabel : entry.text) ?? ""));
++              } catch {
++                return false;
++              }
+             }
+             return { responses: [], processing: false, stopVisible: false, pending: false };
+           },
+@@ -223,8 +239,8 @@ test("#13381: a confirmed model-mode read-back lets the request proceed to the p
+     "a CONFIRMED mode switch must proceed to the (unanswered-by-the-fake-page) prompt, not fail closed"
+   );
+   assert.ok(
+-    calls.some((c) => c.fn === "mode.click"),
+-    "the mode toggle must have been clicked"
++    calls.some((c) => c.fn === "waitForSelector" && String(c.args[0]).includes("mode picker")),
++    "the mode picker must have been located"
+   );
+   assert.ok(
+     calls.some((c) => c.fn === "editor.click"),
+@@ -293,7 +309,10 @@ test("#13381: Extended Thinking is attempted and, once confirmed, the request pr
+ 
+   // #16575: the answer-less fake page waits out the 5s abort (terminal 400), not 502
+   assert.equal(status, 400, "a CONFIRMED Extended Thinking switch must proceed to the prompt");
+-  assert.ok(calls.some((c) => c.fn === "mode.click"));
++  assert.ok(
++    calls.some((c) => c.fn === "waitForSelector" && String(c.args[0]).includes("deep-think-toggle")),
++    "the Extended Thinking control must have been located"
++  );
+ });
+ 
+ test(
+@@ -364,7 +383,10 @@ test("#16573: a confirmed Argon mode switch proceeds to the prompt", async () =>
+   // Abort-terminal 400 (the answer-less fake page waits out the 5s abort);
+   // the point is the automation trace: mode picked, then the editor reached.
+   assert.equal(status, 400);
+-  assert.ok(calls.some((c) => c.fn === "mode.click"), "the mode picker must have been opened");
++  assert.ok(
++    calls.some((c) => c.fn === "waitForSelector" && String(c.args[0]).includes("mode picker")),
++    "the mode picker must have been located"
++  );
+   assert.ok(calls.some((c) => c.fn === "editor.click"), "must reach the prompt editor once confirmed");
+ });
+ 
+@@ -408,7 +430,7 @@ test("#16573: Argon fails closed when the read-back still shows the old mode", a
+ 
+ // ─── menu-item click: in-page unit level ────────────────────────────────────
+ 
+-test("#16573: clickGeminiMenuItemInPage clicks the pattern-matching item", () => {
++test("#16573: clickGeminiMenuItemInPage clicks the pattern-matching item", async () => {
+   const { clickGeminiMenuItemInPage } = modeSelectionModule;
+   let clicked: string | null = null;
+   const doc = {
+@@ -421,15 +443,15 @@ test("#16573: clickGeminiMenuItemInPage clicks the pattern-matching item", () =>
+           ]
+         : [],
+   } as never;
+-  const ok = clickGeminiMenuItemInPage(
+-    { pattern: "Argon", flags: "i", itemSelector: 'gem-menu-item[role="menuitem"]' },
++  const ok = await clickGeminiMenuItemInPage(
++    { pattern: "Argon", flags: "i", itemSelector: 'gem-menu-item[role="menuitem"]', waitMs: 200 },
+     doc
+   );
+   assert.equal(ok, true);
+   assert.equal(clicked, "argon");
+ });
+ 
+-test("#16573: Flash pattern matches Flash but not Flash-Lite", () => {
++test("#16573: Flash pattern matches Flash but not Flash-Lite", async () => {
+   const { clickGeminiMenuItemInPage } = modeSelectionModule;
+   let clicked: string | null = null;
+   const doc = {
+@@ -438,21 +460,21 @@ test("#16573: Flash pattern matches Flash but not Flash-Lite", () => {
+       { innerText: "3.8 Flash\nAll-around help", click: () => { clicked = "flash"; } },
+     ],
+   } as never;
+-  const ok = clickGeminiMenuItemInPage(
+-    { pattern: "Flash(?!-Lite)", flags: "i", itemSelector: "x" },
++  const ok = await clickGeminiMenuItemInPage(
++    { pattern: "Flash(?!-Lite)", flags: "i", itemSelector: "x", waitMs: 200 },
+     doc
+   );
+   assert.equal(ok, true);
+   assert.equal(clicked, "flash", "must not select Flash-Lite when Flash was requested");
+ });
+ 
+-test("#16573: clickGeminiMenuItemInPage returns false when no item matches", () => {
++test("#16573: clickGeminiMenuItemInPage returns false when no item matches", async () => {
+   const { clickGeminiMenuItemInPage } = modeSelectionModule;
+   const doc = {
+     querySelectorAll: () => [{ innerText: "3.8 Flash\nAll-around help", click: () => {} }],
+   } as never;
+   assert.equal(
+-    clickGeminiMenuItemInPage({ pattern: "Argon", flags: "i", itemSelector: "x" }, doc),
++    await clickGeminiMenuItemInPage({ pattern: "Argon", flags: "i", itemSelector: "x", waitMs: 150 }, doc),
+     false
+   );
+ });
+-- 
+2.56.0
+
