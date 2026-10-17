@@ -1,0 +1,41 @@
+From 841ef9fa89b6191156092f0d08062fa2a4356bba Mon Sep 17 00:00:00 2001
+From: jev-router <jev-router@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 08:19:33 +0700
+Subject: [PATCH] fix(providers): give gemini-web mode selection a
+ hydration-tolerant timeout
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Live testing on the deployed build showed control_not_found for every mode
+switch: the readiness check gates on the composer, which hydrates BEFORE the
+mode picker, and on a cold/slow page (Docker, shared CPU) the picker was still
+missing when the 5s selection budget expired. Bump the default selectGeminiUiMode
+budget to 15s — the observed picker lag fits comfortably.
+
+Also learned live: the selected mode persists server-side per account (a fresh
+context opens already in the previously selected mode), so selection must always
+run and read back — which it does; no assumption added.
+---
+ open-sse/executors/gemini-web/modeSelection.ts | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/open-sse/executors/gemini-web/modeSelection.ts b/open-sse/executors/gemini-web/modeSelection.ts
+index 88d4515b..76352a7f 100644
+--- a/open-sse/executors/gemini-web/modeSelection.ts
++++ b/open-sse/executors/gemini-web/modeSelection.ts
+@@ -226,7 +226,10 @@ export function clickGeminiMenuItemInPage(
+ export async function selectGeminiUiMode(
+   page: GeminiAutomationPage,
+   descriptor: GeminiWebModeDescriptor,
+-  timeoutMs = 5000
++  // The readiness check gates on the composer, which hydrates BEFORE the mode
++  // picker; on a cold/slow page (Docker, shared CPU) the picker can miss a 5s
++  // budget and look like "control not found". 15s covers the observed lag.
++  timeoutMs = 15000
+ ): Promise<GeminiModeSelectionResult> {
+   if (descriptor.isDefault) return { confirmed: true, descriptor };
+ 
+-- 
+2.56.0
+
