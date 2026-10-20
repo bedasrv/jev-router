@@ -87,7 +87,7 @@ test("router: a continuation does not pin a member that is failing now", async (
 
 test("router: onRouteResult never throws on junk; Jev menu skips cooling candidates", async () => {
   const seen = [];
-  const jev = { ask: async (_cfg, payload) => { seen.push(payload.state.candidates.length); return { ok: false, error: "x", tried: [] }; } };
+  const jev = { ask: async (_cfg, payload) => { seen.push(payload.ids.length); return { ok: false, error: "x", tried: [] }; } };
   const { r } = mk(jev);
   assert.doesNotThrow(() => { r.onRouteResult(null); r.onRouteResult({}); r.onRouteResult({ attempts: "no" }); });
   await r.onRoute({ model: "paid", requestId: "p", headers: {}, body: { messages: [{ role: "user", content: "hi" }] } });

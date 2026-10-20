@@ -58,7 +58,7 @@ test("client: failover to the next source, cooldown after three failures, malfor
   const calls = []; let t = 0;
   const fetchImpl = async (url) => { calls.push(url); if (url.endsWith("/a")) return { ok: false, status: 500 }; return answer("c1", { c1: 0.8, c2: 0.2 }); };
   const jev = createJev({ fetchImpl, now: () => (t += 1) });
-  const payload = { state: { candidates: [{ id: "c1" }, { id: "c2" }] } };
+  const payload = { ids: ["c1", "c2"], state: {}, questions: {} };
   const r1 = await jev.ask(cfg(), payload);
   assert.equal(r1.ok, true); assert.equal(r1.source, "b"); assert.equal(r1.tried[0].source, "a");
   await jev.ask(cfg(), payload); await jev.ask(cfg(), payload); // a fails 3x -> cools
@@ -73,4 +73,19 @@ test("helpers: confidence formula, ask text after the last assistant, descriptio
   assert.ok(!/[0-9]/.test(describeCandidate("i", { context_length: 262144 }, "budget 5x; fast")));
   const pl = buildPayload({ pool: "paid", ask: "x", req: { tokens: 10, images: 0, usesTools: true }, shown: ["a/p1", "b/p2"], facts: { "a/p1": { context_length: 1e6 }, "b/p2": { context_length: 1e5 } }, policy: { models: {} } });
   assert.deepEqual(Object.keys(pl.questions.model.criteria), ["c1", "c2"]); assert.ok(pl.questions.model.criteria.c1.includes("huge"));
+  assert.deepEqual(pl.ids, ["c1", "c2"]); assert.equal(pl.state.needs_tools.startsWith("yes"), true); assert.equal(typeof pl.state.size, "string");
+});
+test("structured options: good_at/weak_at/cost become an object without digits; the model name is never sent", () => {
+  const d = describeCandidate("ocgoa/x-5.3", { context_length: 1e6 }, { good_at: "Indonesian writing, code 4x", weak_at: "very long math", cost: "included in subscription" });
+  assert.deepEqual(Object.keys(d), ["good_at", "weak_at", "cost", "context"]);
+  assert.ok(!/[0-9]/.test(JSON.stringify(d))); assert.equal(d.context, "huge context window");
+  const pl = buildPayload({ pool: "free", ask: "halo", req: { tokens: 10, images: 1, usesTools: false }, shown: ["ocgoa/x-5.3", "openrouter/y"], facts: {}, policy: { models: { "ocgoa/x-5.3": { good_at: "chat", cost: "free" } } } });
+  const sent = JSON.stringify({ state: pl.state, questions: pl.questions });
+  assert.ok(!sent.includes("ocgoa") && !sent.includes("openrouter")); assert.equal(pl.state.has_image, "yes");
+  assert.equal(typeof pl.questions.model.criteria.c2, "string"); // no good_at: the one-line fallback
+});
+test("client: the request body carries model, state and questions only (no internal ids)", async () => {
+  let sentBody; const jev = createJev({ fetchImpl: async (_u, init) => { sentBody = JSON.parse(init.body); return answer("c1", { c1: 1, c2: 0 }); } });
+  await jev.ask(cfg({ sources: [src("a")] }), { ids: ["c1", "c2"], state: { request: "x" }, questions: { model: { type: "choice" } } });
+  assert.deepEqual(Object.keys(sentBody).sort(), ["model", "questions", "state"]);
 });

@@ -36,8 +36,8 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       const thr = cfg.threshold ?? 0.5;
       // opt-in labelling aid: a short ask excerpt for turns where Jev disagrees with the static head
       if (cfg.sample_file && res.ok && pick !== staticHead) {
-        createLog(path.resolve(path.dirname(policyFile), cfg.sample_file))({ id: ctx.requestId ?? null, pool, ask: payload.state.ask.slice(0, cfg.sample_chars ?? 300), tools: req.usesTools,
-          static_head: staticHead, jev_pick: pick, confidence: Number(res.confidence.toFixed(3)), shown: shown.map((id, n) => ({ id, desc: payload.state.candidates[n].description })) });
+        createLog(path.resolve(path.dirname(policyFile), cfg.sample_file))({ id: ctx.requestId ?? null, pool, ask: payload.state.request.slice(0, cfg.sample_chars ?? 300), tools: req.usesTools,
+          static_head: staticHead, jev_pick: pick, confidence: Number(res.confidence.toFixed(3)), shown: shown.map((id, n) => ({ id, desc: payload.questions.model.criteria[payload.ids[n]] })) });
       }
       log({ event: "jev", id: ctx.requestId ?? null, mode: cfg.mode, pool, conv: hash(key), ok: res.ok, source: res.source, latency_ms: res.latency_ms, shown,
         pick, confidence: res.ok ? Number(res.confidence.toFixed(3)) : undefined, probabilities: res.ok ? res.probabilities : undefined,

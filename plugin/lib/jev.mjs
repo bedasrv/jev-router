@@ -4,12 +4,20 @@ import fs from "node:fs";
 // across sources, per-source cooldown, an overall deadline. Never throws: returns {ok:false,error}.
 
 const windowClass = (ctx) => (ctx >= 700000 ? "huge context window" : ctx >= 300000 ? "large context window" : "standard context window");
+const words = (t) => String(t).replace(/[0-9]/g, "").replace(/\s+/g, " ").trim();
 
-// Fixed phrases, never numbers (Jev is weak on numerics): traits text from policy + a window class.
-export function describeCandidate(id, f, traits) {
-  const t = (traits ?? "general purpose model").replace(/[0-9]/g, "").replace(/\s+/g, " ").trim();
+// Fixed phrases, never numbers (Jev is weak on numerics). A model with `good_at` in the policy is
+// described as a structured option (what it is good at, where it is weak, what it costs); otherwise
+// the older one-line `traits` text is used.
+export function describeCandidate(id, f, m) {
+  const meta = typeof m === "string" ? { traits: m } : (m ?? {});
   const ctx = Number.isFinite(f?.context_length) ? f.context_length : 0;
-  return `${t}; ${windowClass(ctx)}`;
+  if (!meta.good_at) return `${words(meta.traits ?? "general purpose model")}; ${windowClass(ctx)}`;
+  const out = { good_at: words(meta.good_at) };
+  if (meta.weak_at) out.weak_at = words(meta.weak_at);
+  out.cost = words(meta.cost ?? "unknown cost");
+  out.context = windowClass(ctx);
+  return out;
 }
 
 // The task text: the user message(s) after the last assistant message (clients such as opencode
@@ -22,12 +30,35 @@ export function askText(body, max = 1200) {
   return msgs.slice(i + 1).filter((m) => m?.role === "user").map(txt).join("\n").slice(0, max);
 }
 
+const sizeWords = (tokens) => (tokens > 60000 ? "very long conversation or large attached text" : tokens > 8000 ? "long conversation" : tokens > 1500 ? "medium conversation" : "short conversation");
+
+// One Choice question. The options are the shortlist (ids c1..cn, never model names); the state is the
+// guest's request plus facts code knows (tools, images, size in words).
+export const INSTRUCTIONS = {
+  question: "Which model should answer this request from a cafe guest?",
+  goal: "The answer must be complete and correct in one pass. Guests usually write Indonesian and expect fluent, natural Indonesian back.",
+  judge: [
+    "how much reasoning, knowledge, writing quality or code the request really needs",
+    "whether it needs tool use such as running code or working with files",
+    "how much harm a wrong or sloppy answer would do",
+  ],
+  ignore: "how long the guest wants the answer to be",
+  tie_break: "If several options can fully do it, pick the one that costs less: included in the subscription costs less than pay per use.",
+};
+
 export function buildPayload({ pool, ask, req, shown, facts, policy }) {
-  const candidates = shown.map((id, n) => ({ id: `c${n + 1}`, description: describeCandidate(id, facts[id], policy.models?.[id]?.traits) }));
-  const criteria = Object.fromEntries(candidates.map((c) => [c.id, c.description]));
+  const ids = shown.map((_, n) => `c${n + 1}`);
+  const criteria = Object.fromEntries(shown.map((id, n) => [ids[n], describeCandidate(id, facts[id], policy.models?.[id])]));
   return {
-    state: { ask, pool, context: { chars: req.tokens * 4, has_image: req.images > 0, uses_tools: req.usesTools }, candidates },
-    questions: { model: { type: "choice", instructions: "Pick the specialist that can fully complete this request in one pass. Judge required reasoning, scope, ambiguity, tool use and blast radius, not requested answer length. If two fit, pick the cheaper one.", criteria } },
+    ids,
+    state: {
+      request: ask,
+      pool: pool === "paid" ? "premium (paid) guest" : "free guest",
+      needs_tools: req.usesTools ? "yes, the request comes with tools the model may call" : "no",
+      has_image: req.images > 0 ? "yes" : "no",
+      size: sizeWords(req.tokens),
+    },
+    questions: { model: { type: "choice", instructions: INSTRUCTIONS, criteria } },
   };
 }
 
@@ -64,10 +95,10 @@ export function createJev({ fetchImpl = fetch, readFile = (f) => fs.readFileSync
         const headers = { "content-type": "application/json" };
         const key = keyOf(src);
         if (key) headers.authorization = "Bearer " + key;
-        const r = await fetchImpl(src.url, { method: "POST", headers, body: JSON.stringify({ ...payload, model: src.model }), signal: AbortSignal.timeout(Math.min(cfg.source_timeout_ms ?? 1200, left)) });
+        const r = await fetchImpl(src.url, { method: "POST", headers, body: JSON.stringify({ model: src.model, state: payload.state, questions: payload.questions }), signal: AbortSignal.timeout(Math.min(cfg.source_timeout_ms ?? 1200, left)) });
         if (!r.ok) throw new Error("HTTP " + r.status);
         const a = (await r.json())?.answers?.model;
-        const ids = payload.state.candidates.map((c) => c.id);
+        const ids = payload.ids;
         if (!a || !ids.includes(a.choice) || typeof a.probabilities !== "object") throw new Error("malformed answer");
         health.delete(src.name);
         return { ok: true, source: src.name, latency_ms: now() - ts, choice: a.choice, index: ids.indexOf(a.choice), probabilities: a.probabilities, confidence: confidence(a.probabilities), tried };
