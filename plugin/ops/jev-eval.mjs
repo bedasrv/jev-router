@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import { buildPayload, confidence } from "../lib/jev.mjs";
 
-const [policyFile, profilesFile, jevModel = "typesafe/jev-1.14-20261014"] = process.argv.slice(2);
+const [policyFile, profilesFile, jevModel = "~typesafe/jev-latest"] = process.argv.slice(2);
 const policy = JSON.parse(fs.readFileSync(policyFile, "utf8"));
 const profiles = profilesFile ? JSON.parse(fs.readFileSync(profilesFile, "utf8")) : {};
 const URL_ = "https://openrouter.ai/api/v1/systemone";
