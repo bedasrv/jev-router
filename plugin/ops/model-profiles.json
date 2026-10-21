@@ -1,16 +1,77 @@
 {
-  "_comment": "Model descriptions Jev chooses between (policy.models[*].good_at/weak_at/cost). Jev never sees names or numbers; these words are the whole basis of its pick. Sources: OpenRouter benchmark indices + warslop gates of 2026-10-20 (Indonesian answer, tool call, first token, Chinese-leak runs). Cost words: OpenCode Go models are included in a flat subscription; OpenRouter models are pay per use.",
-  "ocgoa/opencode-go/deepseek-v4.1-flash": { "good_at": "everyday questions, homework help, writing in natural Indonesian, coding and tool use; answers quickly", "weak_at": "the hardest multi-step reasoning problems", "cost": "included in the subscription" },
-  "ocgob/opencode-go/glm-5.3-flash": { "good_at": "coding and multi-step tool use (strong coding results), clear Indonesian, fast answers", "weak_at": "long careful essays", "cost": "included in the subscription" },
-  "openrouter/z-ai/glm-5.3-flash": { "good_at": "coding and multi-step tool use (strong coding results), clear Indonesian, the fastest to start answering", "weak_at": "long careful essays", "cost": "pay per use, very cheap" },
-  "ocgoa/opencode-go/qwen3.8-flash": { "good_at": "short general questions and simple writing; fast", "weak_at": "complex coding and long reasoning", "cost": "included in the subscription" },
-  "ocgob/opencode-go/gpt-6-luna": { "good_at": "careful reasoning and polished, well-structured writing in Indonesian and English, such as CVs, letters and reports", "weak_at": "slower to start answering", "cost": "included in the subscription" },
-  "openrouter/anthropic/claude-haiku-5.5": { "good_at": "the strongest here at hard reasoning, careful analysis of documents and data, high-stakes advice and long multi-step tool use; quick", "cost": "pay per use, the most expensive option here" },
-  "ocgob/opencode-go/mimo-v2.6-flash": { "good_at": "general chat and summaries", "weak_at": "hard reasoning; slower to start", "cost": "included in the subscription" },
-  "openrouter/openai/gpt-6-luna": { "good_at": "careful reasoning and polished, well-structured writing in Indonesian and English", "weak_at": "slower to start answering", "cost": "pay per use, moderate" },
-  "ocpv/opencode-go/beam-free": { "good_at": "everyday questions and writing in clean Indonesian, simple tool use", "weak_at": "hard reasoning and complex code", "cost": "free" },
-  "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": { "good_at": "reasoning, maths and code, with clean Indonesian", "weak_at": "can be slow on long answers", "cost": "free" },
-  "ocpv/opencode-go/minimax-m3.1-flash-free": { "good_at": "the strongest free option at hard reasoning, coding and multi-step tool use", "weak_at": "sometimes mixes Chinese words into Indonesian answers", "cost": "free" },
-  "openrouter/minimax/minimax-m3.1-flash:free": { "good_at": "the strongest free option at hard reasoning, coding and multi-step tool use", "weak_at": "sometimes mixes Chinese words into Indonesian answers", "cost": "free" },
-  "ocpv/opencode-go/longcat-2.5-preview-free": { "good_at": "simple requests", "weak_at": "very slow to start answering", "cost": "free" }
+  "_comment": "Model descriptions Jev chooses between (policy.models[*].good_at/weak_at/cost). Jev never sees names or numbers; these words are the whole basis of its pick. Sources: Artificial Analysis API (intelligence/coding index, speed, first-token time) joined with OpenRouter price/window, plus warslop gates of 2026-10-20/21 (Indonesian answer, tool call, first token, Chinese-leak runs). Cost words: OpenCode Go models are included in a flat subscription; OpenRouter models are pay per use.",
+  "ocgoa/opencode-go/deepseek-v4.1-flash": {
+    "good_at": "everyday questions, homework help, writing in natural Indonesian, coding and tool use; the fastest to answer",
+    "weak_at": "the hardest multi-step reasoning problems",
+    "cost": "included in the subscription"
+  },
+  "ocgoa/opencode-go/qwen3.8-flash": {
+    "good_at": "short and medium general questions, summaries, simple writing and everyday coding; fast, reads images",
+    "weak_at": "the hardest reasoning problems",
+    "cost": "included in the subscription"
+  },
+  "ocgob/opencode-go/gpt-6-luna": {
+    "good_at": "careful reasoning and polished, well-structured writing in Indonesian and English, such as CVs, letters and reports",
+    "weak_at": "slower to start answering",
+    "cost": "included in the subscription"
+  },
+  "ocgob/opencode-go/glm-5.3-flash": {
+    "good_at": "coding, debugging and multi-step tool use (the best coding results among the cheap models), clear Indonesian, reads images; fast",
+    "weak_at": "very long careful essays",
+    "cost": "included in the subscription"
+  },
+  "ocpv/opencode-go/longcat-2.5-preview-free": {
+    "good_at": "simple requests",
+    "weak_at": "very slow to start answering",
+    "cost": "free"
+  },
+  "ocgob/opencode-go/mimo-v2.6-flash": {
+    "good_at": "general chat, summaries and light writing; reads images; the cheapest",
+    "weak_at": "hard reasoning and code; slower to start",
+    "cost": "included in the subscription"
+  },
+  "openrouter/z-ai/glm-5.3-flash": {
+    "good_at": "coding, debugging and multi-step tool use (the best coding results among the cheap models), clear Indonesian, reads images; the fastest to start answering",
+    "weak_at": "very long careful essays",
+    "cost": "pay per use, very cheap"
+  },
+  "openrouter/anthropic/claude-haiku-5.5": {
+    "good_at": "the strongest here at hard reasoning, careful analysis of documents and data, high-stakes advice and long multi-step tool use; quick",
+    "cost": "pay per use, the most expensive option here"
+  },
+  "openrouter/openai/gpt-6-luna": {
+    "good_at": "careful reasoning and polished, well-structured writing in Indonesian and English",
+    "weak_at": "slower to start answering",
+    "cost": "pay per use, moderate"
+  },
+  "ocpv/opencode-go/minimax-m3.1-flash-free": {
+    "good_at": "the strongest free option by a wide margin at hard reasoning, coding and multi-step tool use; reads images",
+    "weak_at": "sometimes mixes Chinese words into Indonesian answers",
+    "cost": "free"
+  },
+  "ocpv/opencode-go/beam-free": {
+    "good_at": "everyday questions and writing in clean Indonesian, simple tool use",
+    "weak_at": "hard reasoning and complex code",
+    "cost": "free"
+  },
+  "openrouter/minimax/minimax-m3.1-flash:free": {
+    "good_at": "the strongest free option by a wide margin at hard reasoning, coding and multi-step tool use; reads images",
+    "weak_at": "sometimes mixes Chinese words into Indonesian answers",
+    "cost": "free"
+  },
+  "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": {
+    "good_at": "clean Indonesian, short factual answers and simple code",
+    "weak_at": "hard reasoning and maths (the weakest of the free options); can be slow on long answers",
+    "cost": "free"
+  },
+  "openrouter/deepseek/deepseek-v4.1-flash-1017": {
+    "good_at": "the strongest cheap all-rounder: hard reasoning and maths, difficult coding, long multi-step tool use and careful answers, reads images; still fast",
+    "weak_at": "pay per use, so only when the included models are not enough",
+    "cost": "pay per use, cheap"
+  },
+  "openrouter/inclusionai/ling-3.1-flash": {
+    "good_at": "quick general questions, chat, summaries and simple coding; very fast and very cheap",
+    "weak_at": "hard reasoning; does not read images; shorter memory (about a quarter of a million tokens)",
+    "cost": "pay per use, very cheap"
+  }
 }

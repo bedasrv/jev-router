@@ -13,23 +13,24 @@ const KEY = process.env.OPENROUTER_API_KEY;
 
 const P = policy.order.paid, F = policy.order.free;
 const sub = P.filter((m) => !m.startsWith("openrouter/")); // included in the subscription
-const strong = ["openrouter/anthropic/claude-haiku-5.5", "ocgob/opencode-go/gpt-6-luna", "openrouter/openai/gpt-6-luna", "ocgob/opencode-go/glm-5.3-flash", "openrouter/z-ai/glm-5.3-flash", "ocgoa/opencode-go/deepseek-v4.1-flash"];
-const coder = ["ocgob/opencode-go/glm-5.3-flash", "openrouter/z-ai/glm-5.3-flash", "ocgoa/opencode-go/deepseek-v4.1-flash", "openrouter/anthropic/claude-haiku-5.5"];
+const cheap = [...sub, "openrouter/inclusionai/ling-3.1-flash"]; // plus the very cheap pay-per-use one
+const strong = ["openrouter/deepseek/deepseek-v4.1-flash-1017", "openrouter/anthropic/claude-haiku-5.5", "ocgob/opencode-go/gpt-6-luna", "openrouter/openai/gpt-6-luna", "ocgob/opencode-go/glm-5.3-flash", "openrouter/z-ai/glm-5.3-flash", "ocgoa/opencode-go/deepseek-v4.1-flash"];
+const coder = ["openrouter/deepseek/deepseek-v4.1-flash-1017", "ocgob/opencode-go/glm-5.3-flash", "openrouter/z-ai/glm-5.3-flash", "ocgoa/opencode-go/deepseek-v4.1-flash", "openrouter/anthropic/claude-haiku-5.5"];
 const freeClean = ["ocpv/opencode-go/beam-free", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"];
 const freeStrong = [...freeClean, "ocpv/opencode-go/minimax-m3.1-flash-free", "openrouter/minimax/minimax-m3.1-flash:free"];
 const T = { tokens: 300, images: 0, usesTools: true };
 
 const cases = [
-  { pool: "paid", ask: "halo, apa kabar? lagi ngapain?", ok: sub.filter((m) => !m.includes("gpt-6-luna")) },
-  { pool: "paid", ask: "Ibu kota Australia apa ya?", ok: sub },
-  { pool: "paid", ask: "Buatkan CV dalam bahasa Inggris dari data ini: nama Rina, lulusan SMK akuntansi 2024, magang 6 bulan di koperasi, bisa Excel.", ok: [...sub, "openrouter/openai/gpt-6-luna"] },
-  { pool: "paid", ask: "Tolong tulis surat lamaran kerja formal untuk posisi kasir di minimarket.", ok: [...sub, "openrouter/openai/gpt-6-luna"] },
+  { pool: "paid", ask: "halo, apa kabar? lagi ngapain?", ok: cheap.filter((m) => !m.includes("gpt-6-luna")) },
+  { pool: "paid", ask: "Ibu kota Australia apa ya?", ok: cheap },
+  { pool: "paid", ask: "Buatkan CV dalam bahasa Inggris dari data ini: nama Rina, lulusan SMK akuntansi 2024, magang 6 bulan di koperasi, bisa Excel.", ok: [...cheap, "openrouter/openai/gpt-6-luna"] },
+  { pool: "paid", ask: "Tolong tulis surat lamaran kerja formal untuk posisi kasir di minimarket.", ok: [...cheap, "openrouter/openai/gpt-6-luna"] },
   { pool: "paid", ask: "Tolong perbaiki kode Python ini, error IndexError di loop baris 12, lalu jalankan tesnya.", ok: coder },
   { pool: "paid", ask: "Ini file Excel penjualan toko saya 3 bulan. Analisis tren per produk dan buatkan grafik serta ringkasan.", ok: strong },
   { pool: "paid", ask: "Saya dapat surat perjanjian kontrak kerja ini. Apakah ada pasal yang merugikan saya? Jelaskan risikonya.", ok: ["openrouter/anthropic/claude-haiku-5.5", "ocgob/opencode-go/gpt-6-luna", "openrouter/openai/gpt-6-luna"] },
   { pool: "paid", ask: "Buktikan bahwa akar dua adalah bilangan irasional, langkah demi langkah.", ok: strong },
-  { pool: "paid", ask: "Ringkas artikel berita ini jadi 3 poin.", ok: sub },
-  { pool: "paid", ask: "Bikin caption Instagram lucu buat jualan kopi susu gula aren.", ok: sub },
+  { pool: "paid", ask: "Ringkas artikel berita ini jadi 3 poin.", ok: cheap },
+  { pool: "paid", ask: "Bikin caption Instagram lucu buat jualan kopi susu gula aren.", ok: cheap },
   { pool: "free", ask: "halo kak", ok: freeClean },
   { pool: "free", ask: "Jelaskan proses fotosintesis untuk anak SMP dalam bahasa Indonesia.", ok: freeClean },
   { pool: "free", ask: "Kerjakan soal ini: sebuah mobil melaju 60 km/jam selama 2,5 jam, berapa jarak tempuhnya? Jelaskan caranya.", ok: freeStrong },
