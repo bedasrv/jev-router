@@ -12,30 +12,39 @@ const URL_ = "https://openrouter.ai/api/v1/systemone";
 const KEY = process.env.OPENROUTER_API_KEY;
 
 const P = policy.order.paid, F = policy.order.free;
-const sub = P.filter((m) => !m.startsWith("openrouter/")); // included in the subscription
-const cheap = [...sub, "openrouter/inclusionai/ling-3.1-flash"]; // plus the very cheap pay-per-use one
-const strong = ["openrouter/deepseek/deepseek-v4.1-flash-1017", "openrouter/anthropic/claude-haiku-5.5", "ocgob/opencode-go/gpt-6-luna", "openrouter/openai/gpt-6-luna", "ocgob/opencode-go/glm-5.3-flash", "openrouter/z-ai/glm-5.3-flash", "ocgoa/opencode-go/deepseek-v4.1-flash"];
-const coder = ["openrouter/deepseek/deepseek-v4.1-flash-1017", "ocgob/opencode-go/glm-5.3-flash", "openrouter/z-ai/glm-5.3-flash", "ocgoa/opencode-go/deepseek-v4.1-flash", "openrouter/anthropic/claude-haiku-5.5"];
-const freeClean = ["ocpv/opencode-go/beam-free", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"];
-const freeStrong = [...freeClean, "ocpv/opencode-go/minimax-m3.1-flash-free", "openrouter/minimax/minimax-m3.1-flash:free"];
+// Acceptable picks per task, from the Artificial Analysis per-task columns (see model-profiles.json). Haiku and Luna are never acceptable for these:
+// at the effort they run here they are the weakest on terminal-task and hard-reasoning benchmarks. Writing and small talk are not paid-pool tasks.
+const GLM = ["ocgob/opencode-go/glm-5.3-flash", "openrouter/z-ai/glm-5.3-flash"];
+const DEEP = "ocgoa/opencode-go/deepseek-v4.1-flash", D1017 = "openrouter/deepseek/deepseek-v4.1-flash-1017", LING = "openrouter/inclusionai/ling-3.1-flash", QWEN = "ocgoa/opencode-go/qwen3.8-flash";
+const agentic = [...GLM, D1017, LING, DEEP];
+const coder = [...GLM, QWEN, D1017];
+const hardReasoning = [D1017, ...GLM, DEEP, LING];
+const longDoc = [DEEP, D1017, LING, ...GLM];
+const quick = P.filter((m) => !m.includes("gpt-6-luna") && !m.includes("haiku"));
+const freeEasy = ["ocpv/opencode-go/beam-free", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "ocpv/opencode-go/minimax-m3.1-flash-free", "openrouter/minimax/minimax-m3.1-flash:free"];
+const freeSummary = freeEasy;
+const freeHard = ["ocpv/opencode-go/minimax-m3.1-flash-free", "openrouter/minimax/minimax-m3.1-flash:free"];
+const freeCode = [...freeHard, "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"];
 const T = { tokens: 300, images: 0, usesTools: true };
 
 const cases = [
-  { pool: "paid", ask: "halo, apa kabar? lagi ngapain?", ok: cheap.filter((m) => !m.includes("gpt-6-luna")) },
-  { pool: "paid", ask: "Ibu kota Australia apa ya?", ok: cheap },
-  { pool: "paid", ask: "Buatkan CV dalam bahasa Inggris dari data ini: nama Rina, lulusan SMK akuntansi 2024, magang 6 bulan di koperasi, bisa Excel.", ok: [...cheap, "openrouter/openai/gpt-6-luna"] },
-  { pool: "paid", ask: "Tolong tulis surat lamaran kerja formal untuk posisi kasir di minimarket.", ok: [...cheap, "openrouter/openai/gpt-6-luna"] },
+  { pool: "paid", ask: "Ibu kota Australia apa ya?", ok: quick },
   { pool: "paid", ask: "Tolong perbaiki kode Python ini, error IndexError di loop baris 12, lalu jalankan tesnya.", ok: coder },
-  { pool: "paid", ask: "Ini file Excel penjualan toko saya 3 bulan. Analisis tren per produk dan buatkan grafik serta ringkasan.", ok: strong },
-  { pool: "paid", ask: "Saya dapat surat perjanjian kontrak kerja ini. Apakah ada pasal yang merugikan saya? Jelaskan risikonya.", ok: ["openrouter/anthropic/claude-haiku-5.5", "ocgob/opencode-go/gpt-6-luna", "openrouter/openai/gpt-6-luna"] },
-  { pool: "paid", ask: "Buktikan bahwa akar dua adalah bilangan irasional, langkah demi langkah.", ok: strong },
-  { pool: "paid", ask: "Ringkas artikel berita ini jadi 3 poin.", ok: cheap },
-  { pool: "paid", ask: "Bikin caption Instagram lucu buat jualan kopi susu gula aren.", ok: cheap },
-  { pool: "free", ask: "halo kak", ok: freeClean },
-  { pool: "free", ask: "Jelaskan proses fotosintesis untuk anak SMP dalam bahasa Indonesia.", ok: freeClean },
-  { pool: "free", ask: "Kerjakan soal ini: sebuah mobil melaju 60 km/jam selama 2,5 jam, berapa jarak tempuhnya? Jelaskan caranya.", ok: freeStrong },
-  { pool: "free", ask: "Tolong buatkan script Python untuk membaca CSV dan menghitung rata-rata kolom harga.", ok: freeStrong },
-  { pool: "free", ask: "Terjemahkan paragraf ini ke bahasa Indonesia yang baku dan enak dibaca.", ok: freeClean },
+  { pool: "paid", ask: "Tulis fungsi TypeScript untuk parse CSV dengan kutip ganda dan buat unit test-nya.", ok: coder },
+  { pool: "paid", ask: "Ini file Excel penjualan toko saya 3 bulan. Analisis tren per produk, jalankan perhitungannya, dan buatkan grafik.", ok: agentic },
+  { pool: "paid", ask: "Jalankan skrip ini di terminal, baca lognya, cari penyebab crash, lalu perbaiki konfigurasinya.", ok: agentic },
+  { pool: "paid", ask: "Buktikan bahwa akar dua adalah bilangan irasional, langkah demi langkah.", ok: hardReasoning },
+  { pool: "paid", ask: "Ada 5 orang duduk melingkar dengan 4 syarat posisi yang saling bergantung; berapa susunan yang mungkin? Tunjukkan penalarannya.", ok: hardReasoning },
+  { pool: "paid", ask: "Ini kontrak kerja 40 halaman dan 3 lampirannya. Cari pasal yang saling bertentangan dan jelaskan risikonya.", ok: longDoc },
+  { pool: "paid", ask: "Baca seluruh riwayat percakapan panjang kita dan jawab: apa tiga keputusan yang sudah kita ambil dan mana yang belum?", ok: longDoc },
+  { pool: "paid", ask: "Berapa kilometer jarak Jakarta ke Bandung?", ok: quick },
+  { pool: "free", ask: "halo kak", ok: ["ocpv/opencode-go/beam-free"] },
+  { pool: "free", ask: "makasih ya!", ok: ["ocpv/opencode-go/beam-free"] },
+  { pool: "free", ask: "Ringkas artikel berita ini jadi 3 poin.", ok: freeSummary },
+  { pool: "free", ask: "Rangkum catatan rapat ini dalam lima kalimat.", ok: freeSummary },
+  { pool: "free", ask: "Kerjakan soal ini: sebuah mobil melaju 60 km/jam selama 2,5 jam, berapa jarak tempuhnya? Jelaskan caranya.", ok: freeEasy },
+  { pool: "free", ask: "Tolong buatkan script Python untuk membaca CSV dan menghitung rata-rata kolom harga.", ok: freeCode },
+  { pool: "free", ask: "Selesaikan teka-teki logika ini yang butuh beberapa langkah penalaran berantai.", ok: freeHard },
 ];
 
 // The previous payload, kept here only to compare against.
