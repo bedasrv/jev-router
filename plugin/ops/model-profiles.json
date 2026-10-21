@@ -1,22 +1,22 @@
 {
-  "_comment": "Model descriptions Jev chooses between (policy.models[*].good_at/weak_at/cost). Jev never sees names or numbers; these words are the whole basis of its pick. Sources: Artificial Analysis API per-task columns (hard reasoning, terminal/agentic, coding, long context, speed) at the effort each model really runs here, joined with OpenRouter price/window, plus warslop gates of 2026-10-20/21. Writing and Indonesian quality are not ranked (every model does them); small talk and summaries go to the free pool in the app. Cost words: OpenCode Go models are included in a flat subscription; OpenRouter models are pay per use.",
+  "_comment": "Model descriptions Jev chooses between (policy.models[*].good_at/weak_at/cost). Jev never sees names or numbers; these words are the whole basis of its pick. Sources: Artificial Analysis API per-task columns (hard reasoning, terminal/agentic, coding, long context, speed) at the effort each model really runs here, joined with OpenRouter price/window, plus warslop gates of 2026-10-20/21. Domain study questions (science, medicine, law) use Vals AI and AA domain benchmarks. Writing and Indonesian quality are not ranked (every model does them); small talk and summaries go to the free pool in the app. Cost words: OpenCode Go models are included in a flat subscription; OpenRouter models are pay per use.",
   "ocgoa/opencode-go/deepseek-v4.1-flash": {
-    "good_at": "very fast answers, long documents and long conversations (the best long-context reasoning), everyday coding and tool use, solid reasoning",
-    "weak_at": "the toughest multi-step tool tasks, where the 1017 build and glm are stronger",
+    "good_at": "very fast answers, long documents and long conversations (the best long-context reasoning), everyday coding and tool use, solid reasoning; solid on science, medical and legal study questions",
+    "weak_at": "the toughest multi-step tool tasks, where the 1017 build and glm are stronger; legal research a step behind glm",
     "cost": "included in the subscription"
   },
   "ocgoa/opencode-go/qwen3.8-flash": {
-    "good_at": "coding (the best coding-index score among the cheap models) and general tasks, reads images",
-    "weak_at": "long multi-step tool tasks and the hardest reasoning; moderate speed",
+    "good_at": "coding (the best coding-index score among the cheap models) and science exam questions (top science-exam score), general tasks, reads images",
+    "weak_at": "formal proofs and long derivations, long multi-step tool tasks and the hardest reasoning; no measured strength on medical or legal questions; moderate speed",
     "cost": "included in the subscription"
   },
   "ocgob/opencode-go/gpt-6-luna": {
     "good_at": "a different vendor as a fallback when the others fail",
-    "weak_at": "tool use (at the effort it runs here it barely completes terminal tasks), hard reasoning and coding; do not choose it for these",
+    "weak_at": "tool use, hard reasoning, coding, legal research and scientific work (at the effort it runs here it is near the bottom on all of them); do not choose it for these",
     "cost": "included in the subscription"
   },
   "ocgob/opencode-go/glm-5.3-flash": {
-    "good_at": "coding, debugging, data work and long multi-step tool use (top tier on terminal-task and coding benchmarks), solid hard reasoning, reads images; moderate speed",
+    "good_at": "coding, debugging, data work and long multi-step tool use (top tier on terminal-task and coding benchmarks); among the strongest cheap models for study questions in science, medicine and law (science-exam, medical-note and legal-research results); reads images; moderate speed",
     "weak_at": "the fastest answers (it thinks before it answers)",
     "cost": "included in the subscription"
   },
@@ -26,53 +26,53 @@
     "cost": "free"
   },
   "ocgob/opencode-go/mimo-v2.6-flash": {
-    "good_at": "simple factual questions and light tasks; reads images",
-    "weak_at": "coding, tool use and hard reasoning (clearly behind the others); slow to start",
+    "good_at": "simple factual questions and light tasks; reads images; passable on basic science",
+    "weak_at": "coding, tool use, hard reasoning and legal research (clearly behind the others); slow to start",
     "cost": "included in the subscription"
   },
   "openrouter/z-ai/glm-5.3-flash": {
-    "good_at": "coding, debugging, data work and long multi-step tool use (top tier on terminal-task and coding benchmarks), solid hard reasoning, reads images; quick to start",
+    "good_at": "coding, debugging, data work and long multi-step tool use (top tier on terminal-task and coding benchmarks); among the strongest cheap models for study questions in science, medicine and law (science-exam, medical-note and legal-research results); reads images; quick to start",
     "weak_at": "the fastest answers (it thinks before it answers)",
     "cost": "pay per use, very cheap"
   },
   "openrouter/anthropic/claude-haiku-5.5": {
-    "good_at": "a different vendor as a fallback when the others fail",
-    "weak_at": "tool use and hard reasoning at the effort it runs here (well below the deepseek and glm models); the most expensive option",
-    "cost": "pay per use, the most expensive option here"
+    "good_at": "a different vendor as a fallback when the others fail; with long thinking it is strong on legal research, medical notes and science analysis, but it runs quick here",
+    "weak_at": "tool use and hard reasoning at the effort it runs here (well below the deepseek and glm models)",
+    "cost": "pay per use, moderate"
   },
   "openrouter/openai/gpt-6-luna": {
     "good_at": "a different vendor as a fallback when the others fail",
-    "weak_at": "tool use, hard reasoning and coding at the effort it runs here; do not choose it for these",
+    "weak_at": "tool use, hard reasoning, coding, legal research and scientific work at the effort it runs here; do not choose it for these",
     "cost": "pay per use, moderate"
   },
   "ocpv/opencode-go/minimax-m3.1-flash-free": {
-    "good_at": "the strongest free option at hard reasoning, coding and multi-step tool use; reads images; summaries of long text",
+    "good_at": "the strongest free option at hard reasoning, coding and multi-step tool use, and the best free choice for hard science, medical and legal study questions; reads images; summaries of long text",
     "weak_at": "sometimes mixes Chinese words into Indonesian answers",
     "cost": "free"
   },
   "ocpv/opencode-go/beam-free": {
     "good_at": "small talk, greetings, short factual answers and summaries of short or medium text; the fastest to answer",
-    "weak_at": "tool use, code and hard reasoning (nearly fails terminal tasks)",
+    "weak_at": "tool use, code, hard reasoning, and legal or medical questions beyond the basics (low legal-research score)",
     "cost": "free"
   },
   "openrouter/minimax/minimax-m3.1-flash:free": {
-    "good_at": "the strongest free option at hard reasoning, coding and multi-step tool use; reads images; summaries of long text",
+    "good_at": "the strongest free option at hard reasoning, coding and multi-step tool use, and the best free choice for hard science, medical and legal study questions; reads images; summaries of long text",
     "weak_at": "sometimes mixes Chinese words into Indonesian answers",
     "cost": "free"
   },
   "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": {
-    "good_at": "following instructions exactly, summaries, short factual answers and simple code in clean Indonesian",
-    "weak_at": "hard reasoning, long tool tasks and code (the weakest free option there); can be slow on long answers",
+    "good_at": "following instructions exactly, summaries, short factual answers, science exam questions and simple code in clean Indonesian",
+    "weak_at": "hard reasoning, long tool tasks, code and especially legal research (a very low score); can be slow on long answers",
     "cost": "free"
   },
   "openrouter/deepseek/deepseek-v4.1-flash-1017": {
-    "good_at": "the strongest all-rounder here: hard reasoning and maths, difficult coding, long multi-step tool and terminal tasks, long documents; still fast; reads images",
+    "good_at": "the strongest all-rounder here: hard reasoning and maths, difficult coding, long multi-step tool and terminal tasks, long documents, and the best choice for hard science, medical and legal study questions (top hard-reasoning and scientific-coding scores, the best legal-research score among the cheap models); still fast; reads images",
     "weak_at": "pay per use, so only when the included models are not enough",
     "cost": "pay per use, cheap"
   },
   "openrouter/inclusionai/ling-3.1-flash": {
     "good_at": "fast, cheap tool use and long documents (top-tier terminal-task and long-context results for its price), everyday coding and reasoning",
-    "weak_at": "does not read images; shorter memory (about a quarter of a million tokens)",
+    "weak_at": "hard reasoning; legal and medical questions (its family scores at the bottom on legal research and medical tests); does not read images; shorter memory (about a quarter of a million tokens)",
     "cost": "pay per use, very cheap"
   }
 }

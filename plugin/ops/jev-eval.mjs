@@ -25,6 +25,11 @@ const freeEasy = ["ocpv/opencode-go/beam-free", "openrouter/nvidia/nemotron-3-ul
 const freeSummary = freeEasy;
 const freeHard = ["ocpv/opencode-go/minimax-m3.1-flash-free", "openrouter/minimax/minimax-m3.1-flash:free"];
 const freeCode = [...freeHard, "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"];
+// Student domains (Vals AI + AA domain benchmarks): science, medicine, law.
+const science = [D1017, ...GLM, QWEN, DEEP];
+const medicine = [...GLM, D1017, DEEP];
+const law = [D1017, ...GLM, DEEP];
+const freeScience = [...freeHard, "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"];
 const T = { tokens: 300, images: 0, usesTools: true };
 
 const cases = [
@@ -38,12 +43,20 @@ const cases = [
   { pool: "paid", ask: "Ini kontrak kerja 40 halaman dan 3 lampirannya. Cari pasal yang saling bertentangan dan jelaskan risikonya.", ok: longDoc },
   { pool: "paid", ask: "Baca seluruh riwayat percakapan panjang kita dan jawab: apa tiga keputusan yang sudah kita ambil dan mana yang belum?", ok: longDoc },
   { pool: "paid", ask: "Berapa kilometer jarak Jakarta ke Bandung?", ok: quick },
+  { pool: "paid", ask: "Turunkan persamaan gerak parabola dari hukum Newton dan jelaskan mengapa sudut 45 derajat memberi jangkauan maksimum.", ok: science },
+  { pool: "paid", ask: "Jelaskan mekanisme reaksi SN2 versus SN1 untuk mahasiswa kimia organik, lengkap dengan faktor yang menentukan.", ok: science },
+  { pool: "paid", ask: "Jelaskan patofisiologi gagal jantung kongestif dan mekanisme kerja furosemide serta ACE inhibitor untuk ujian farmakologi.", ok: medicine },
+  { pool: "paid", ask: "Seorang pasien datang dengan nyeri dada menjalar ke lengan kiri; bagaimana pendekatan diagnosis banding dan pemeriksaan awalnya?", ok: medicine },
+  { pool: "paid", ask: "Jelaskan unsur-unsur perbuatan melawan hukum menurut Pasal 1365 KUHPerdata dan bedanya dengan wanprestasi, dengan contoh kasus.", ok: law },
+  { pool: "paid", ask: "Analisis apakah klausul eksonerasi dalam kontrak baku ini sah menurut hukum perlindungan konsumen, dan sebutkan dasar hukumnya.", ok: law },
   { pool: "free", ask: "halo kak", ok: ["ocpv/opencode-go/beam-free"] },
   { pool: "free", ask: "makasih ya!", ok: ["ocpv/opencode-go/beam-free"] },
   { pool: "free", ask: "Ringkas artikel berita ini jadi 3 poin.", ok: freeSummary },
   { pool: "free", ask: "Rangkum catatan rapat ini dalam lima kalimat.", ok: freeSummary },
   { pool: "free", ask: "Kerjakan soal ini: sebuah mobil melaju 60 km/jam selama 2,5 jam, berapa jarak tempuhnya? Jelaskan caranya.", ok: freeEasy },
   { pool: "free", ask: "Tolong buatkan script Python untuk membaca CSV dan menghitung rata-rata kolom harga.", ok: freeCode },
+  { pool: "free", ask: "Jelaskan hukum kedua termodinamika dan entropi untuk mahasiswa fisika, dengan satu contoh.", ok: freeScience },
+  { pool: "free", ask: "Jelaskan perbedaan hukum pidana dan perdata serta asas legalitas dengan contoh.", ok: freeHard },
   { pool: "free", ask: "Selesaikan teka-teki logika ini yang butuh beberapa langkah penalaran berantai.", ok: freeHard },
 ];
 
