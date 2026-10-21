@@ -16,19 +16,20 @@ const P = policy.order.paid, F = policy.order.free;
 // at the effort they run here they are the weakest on terminal-task and hard-reasoning benchmarks. Writing and small talk are not paid-pool tasks.
 const GLM = ["ocgob/opencode-go/glm-5.3-flash", "openrouter/z-ai/glm-5.3-flash"];
 const DEEP = "ocgoa/opencode-go/deepseek-v4.1-flash", D1017 = "openrouter/deepseek/deepseek-v4.1-flash-1017", LING = "openrouter/inclusionai/ling-3.1-flash", QWEN = "ocgoa/opencode-go/qwen3.8-flash";
-const agentic = [...GLM, D1017, LING, DEEP];
-const coder = [...GLM, QWEN, D1017];
-const hardReasoning = [D1017, ...GLM, DEEP, LING];
-const longDoc = [DEEP, D1017, LING, ...GLM];
-const quick = P.filter((m) => !m.includes("gpt-6-luna") && !m.includes("haiku"));
+const MUSE = ["ocgoa/opencode-go/muse-spark-1.3-contributor", "openrouter/meta/muse-spark-1.3-contributor"]; // strongest on domain and hard reasoning, but slow
+const agentic = [...GLM, D1017, LING, DEEP, ...MUSE];
+const coder = [...GLM, QWEN, D1017, ...MUSE];
+const hardReasoning = [D1017, ...GLM, DEEP, LING, ...MUSE];
+const longDoc = [DEEP, D1017, LING, ...GLM, ...MUSE];
+const quick = P.filter((m) => !m.includes("gpt-6-luna") && !m.includes("haiku") && !m.includes("muse")); // the slow thinker is not for quick answers
 const freeEasy = ["ocpv/opencode-go/beam-free", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "ocpv/opencode-go/minimax-m3.1-flash-free", "openrouter/minimax/minimax-m3.1-flash:free"];
 const freeSummary = freeEasy;
 const freeHard = ["ocpv/opencode-go/minimax-m3.1-flash-free", "openrouter/minimax/minimax-m3.1-flash:free"];
 const freeCode = [...freeHard, "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"];
 // Student domains (Vals AI + AA domain benchmarks): science, medicine, law.
-const science = [D1017, ...GLM, QWEN, DEEP];
-const medicine = [...GLM, D1017, DEEP];
-const law = [D1017, ...GLM, DEEP];
+const science = [D1017, ...GLM, QWEN, DEEP, ...MUSE];
+const medicine = [...GLM, D1017, DEEP, ...MUSE];
+const law = [D1017, ...GLM, DEEP, ...MUSE];
 const freeScience = [...freeHard, "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"];
 const T = { tokens: 300, images: 0, usesTools: true };
 

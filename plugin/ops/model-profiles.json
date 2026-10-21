@@ -74,5 +74,15 @@
     "good_at": "fast, cheap tool use and long documents (top-tier terminal-task and long-context results for its price), everyday coding and reasoning",
     "weak_at": "hard reasoning; legal and medical questions (its family scores at the bottom on legal research and medical tests); does not read images; shorter memory (about a quarter of a million tokens)",
     "cost": "pay per use, very cheap"
+  },
+  "ocgoa/opencode-go/muse-spark-1.3-contributor": {
+    "good_at": "strong on hard legal, medical and science study questions and difficult coding (it matches the best cheap models at its default thinking and beats them when it thinks longer); reads images and video",
+    "weak_at": "slow: it always thinks first (6 to 8 seconds before the first word, 40 to 50 seconds for a full hard answer); not for quick questions, small talk or simple tasks",
+    "cost": "included in the subscription"
+  },
+  "openrouter/meta/muse-spark-1.3-contributor": {
+    "good_at": "strong on hard legal, medical and science study questions and difficult coding (it matches the best cheap models at its default thinking and beats them when it thinks longer); reads images and video",
+    "weak_at": "slow: it always thinks first (6 to 8 seconds before the first word, 40 to 50 seconds for a full hard answer); not for quick questions, small talk or simple tasks",
+    "cost": "pay per use, very cheap"
   }
 }
