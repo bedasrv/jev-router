@@ -20,11 +20,6 @@
     "weak_at": "the fastest answers (it thinks before it answers)",
     "cost": "included in the subscription"
   },
-  "ocpv/opencode-go/longcat-2.5-preview-free": {
-    "good_at": "simple requests when nothing else answers",
-    "weak_at": "very slow to start answering; weak at reasoning and tools",
-    "cost": "free"
-  },
   "ocgob/opencode-go/mimo-v2.6-flash": {
     "good_at": "simple factual questions and light tasks; reads images; passable on basic science",
     "weak_at": "coding, tool use, hard reasoning and legal research (clearly behind the others); slow to start",
@@ -45,19 +40,9 @@
     "weak_at": "tool use, hard reasoning, coding, legal research and scientific work at the effort it runs here; do not choose it for these",
     "cost": "pay per use, moderate"
   },
-  "ocpv/opencode-go/minimax-m3.1-flash-free": {
-    "good_at": "the strongest free option at hard reasoning, coding and multi-step tool use, and the best free choice for hard science, medical and legal study questions; reads images; summaries of long text",
-    "weak_at": "sometimes mixes Chinese words into Indonesian answers",
-    "cost": "free"
-  },
   "ocpv/opencode-go/beam-free": {
     "good_at": "small talk, greetings, short factual answers and summaries of short or medium text; the fastest to answer",
     "weak_at": "tool use, code, hard reasoning, and legal or medical questions beyond the basics (low legal-research score)",
-    "cost": "free"
-  },
-  "openrouter/minimax/minimax-m3.1-flash:free": {
-    "good_at": "the strongest free option at hard reasoning, coding and multi-step tool use, and the best free choice for hard science, medical and legal study questions; reads images; summaries of long text",
-    "weak_at": "sometimes mixes Chinese words into Indonesian answers",
     "cost": "free"
   },
   "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": {

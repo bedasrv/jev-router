@@ -1,8 +1,8 @@
-From 11ff6725aee807c9d0a71afaae6f9cd78f14fb5e Mon Sep 17 00:00:00 2001
+From bfec124918b6e540ae969d73ca8937c3610144fa Mon Sep 17 00:00:00 2001
 From: bedasrv <266547973+bedasrv@users.noreply.github.com>
 Date: Thu, 15 Oct 2026 00:18:32 +0700
-Subject: [PATCH 2/2] plugins: add onRouteResult hook (per-attempt outcomes of
- a plugin-routed combo)
+Subject: [PATCH] plugins: add onRouteResult hook (per-attempt outcomes of a
+ plugin-routed combo)
 
 Records the HTTP status and classified kind of every dispatched combo attempt in the
 combo decision trace (no error bodies), and sends them, with the pre-dispatch skips,
@@ -32,10 +32,10 @@ picks are failing and demote them.
  12 files changed, 242 insertions(+), 4 deletions(-)
 
 diff --git a/open-sse/services/combo/decisionTrace.ts b/open-sse/services/combo/decisionTrace.ts
-index 54616897..95a6b6c7 100644
+index c504e462..8d9b5ab1 100644
 --- a/open-sse/services/combo/decisionTrace.ts
 +++ b/open-sse/services/combo/decisionTrace.ts
-@@ -93,12 +93,28 @@ export interface AutoEvaluationTrace {
+@@ -102,12 +102,28 @@ export interface AutoEvaluationTrace {
    transitions: AutoEvaluationTransition[];
  }
  
@@ -64,7 +64,7 @@ index 54616897..95a6b6c7 100644
    autoEvaluation: AutoEvaluationTrace | null;
    terminal: { status: number | null; errorClass: string | null } | null;
  }
-@@ -218,6 +234,7 @@ export function startComboTrace(
+@@ -227,6 +243,7 @@ export function startComboTrace(
        strategy: meta.strategy ?? null,
        comboName: meta.comboName ?? null,
        decisions: [],
@@ -72,7 +72,7 @@ index 54616897..95a6b6c7 100644
        autoEvaluation: null,
        terminal: null,
      });
-@@ -245,6 +262,16 @@ export function recordComboDecision(
+@@ -257,6 +274,16 @@ export function recordComboDecision(
    });
  }
  
@@ -90,27 +90,27 @@ index 54616897..95a6b6c7 100644
  export interface SkippedTargetGroup {
    reason: ComboSkipReason;
 diff --git a/open-sse/services/combo/executeTargetAttempt.ts b/open-sse/services/combo/executeTargetAttempt.ts
-index 5a13fe8d..2db6dca6 100644
+index 7087c4bf..0601ebf7 100644
 --- a/open-sse/services/combo/executeTargetAttempt.ts
 +++ b/open-sse/services/combo/executeTargetAttempt.ts
-@@ -72,7 +72,7 @@ import {
- } from "./comboPredicates.ts";
+@@ -75,7 +75,7 @@ import {
  import { applyComboTargetExhaustion } from "./targetExhaustion.ts";
+ import { buildBudgetExhaustedResponse } from "./budgetExhaustion.ts";
  import { advanceNativeCodexTurnGeneration, pinNativeCodexTurn } from "./nativeCodexTurnPin.ts";
 -import { recordComboDecision } from "./decisionTrace.ts";
 +import { recordComboDecision, recordComboOutcome } from "./decisionTrace.ts";
  import { recordProviderCooldown } from "../providerCooldownTracker.ts";
  import {
    validateResponseQuality,
-@@ -359,6 +359,7 @@ export async function executeTargetAttempt(opts: {
+@@ -351,6 +351,7 @@ export async function executeTargetAttempt(
          decision: "dispatched",
        });
      }
 +    const attemptStartedAt = Date.now();
      const result = await deps.handleSingleModelWithTimeout(attemptBody, modelStr, {
        ...targetForAttempt,
-       effectiveComboStrategy: deps.strategy,
-@@ -421,6 +422,13 @@ export async function executeTargetAttempt(opts: {
+       emptyTurnConnectionId,
+@@ -416,6 +417,13 @@ export async function executeTargetAttempt(
            error: quality.reason || "upstream response failed quality validation",
            kind: qualityFailure.kind,
          });
@@ -121,10 +121,10 @@ index 5a13fe8d..2db6dca6 100644
 +          kind: String(qualityFailure.kind),
 +          latencyMs: Date.now() - attemptStartedAt,
 +        });
-         if (i > 0) state.fallbackCount++;
+         state.fallbackCount++;
          state.requestScopedFailureSeen ||= qualityFailure.requestScoped;
          if (qualityFailure.requestScoped)
-@@ -495,6 +503,13 @@ export async function executeTargetAttempt(opts: {
+@@ -522,6 +530,13 @@ export async function executeTargetAttempt(
        }
  
        const latencyMs = Date.now() - deps.startTime;
@@ -138,9 +138,9 @@ index 5a13fe8d..2db6dca6 100644
        emit("combo.target.succeeded", {
          comboName: deps.combo.name,
          targetIndex: i,
-@@ -936,6 +951,13 @@ export async function executeTargetAttempt(opts: {
-         error: errorText || String(result.status),
+@@ -1008,6 +1023,13 @@ export async function executeTargetAttempt(
          kind: classifyComboOutcome(result.status, errorText),
+         code: structuredError?.code,
        });
 +      recordComboOutcome(deps.traceInvocationId, {
 +        target: modelStr,
@@ -150,11 +150,11 @@ index 5a13fe8d..2db6dca6 100644
 +        latencyMs: Date.now() - attemptStartedAt,
 +      });
        state.lastStatus = result.status;
-       if (i > 0) state.fallbackCount++;
-       deps.log.warn("COMBO", `Model ${modelStr} failed with body-specific error, stopping combo`);
-@@ -1161,6 +1183,13 @@ export async function executeTargetAttempt(opts: {
-       error: errorText || String(result.status),
+       // Terminal stop ("stopping combo"): no later target is tried, so this is not
+       // a fallback even when the failing target is not the first one.
+@@ -1246,6 +1268,13 @@ export async function executeTargetAttempt(
        kind: classifyComboOutcome(result.status, errorText),
+       code: structuredError?.code,
      });
 +    recordComboOutcome(deps.traceInvocationId, {
 +      target: modelStr,
@@ -164,13 +164,13 @@ index 5a13fe8d..2db6dca6 100644
 +      latencyMs: Date.now() - attemptStartedAt,
 +    });
      state.lastStatus = result.status;
-     if (i > 0) state.fallbackCount++;
+     state.fallbackCount++;
      // Wire combo failures into the resilience dashboard (model-level lockout)
 diff --git a/src/lib/plugins/hooks.ts b/src/lib/plugins/hooks.ts
-index b7fe5a94..f8bb6c00 100644
+index 9b9aef7c..e874b539 100644
 --- a/src/lib/plugins/hooks.ts
 +++ b/src/lib/plugins/hooks.ts
-@@ -35,6 +35,7 @@ export interface HookRegistration {
+@@ -36,6 +36,7 @@ export interface HookRegistration {
  export const BUILTIN_EVENTS = [
    "onRequest",
    "onRoute",
@@ -178,7 +178,7 @@ index b7fe5a94..f8bb6c00 100644
    "onResponse",
    "onError",
    "onInstall",
-@@ -280,6 +281,44 @@ export interface Plugin {
+@@ -283,6 +284,44 @@ export interface Plugin {
    onDeactivate?: (payload: unknown) => Promise<void> | void;
    onUninstall?: (payload: unknown) => Promise<void> | void;
    onStreamComplete?: (payload: PluginOnStreamCompletePayload) => Promise<void> | void;
@@ -398,10 +398,10 @@ index 1d2cb83e..dd978fd3 100644
      onError: def.onError,
    };
 diff --git a/src/sse/handlers/chat.ts b/src/sse/handlers/chat.ts
-index a4186acb..74f388c8 100644
+index 30154ed1..c6c2ea28 100644
 --- a/src/sse/handlers/chat.ts
 +++ b/src/sse/handlers/chat.ts
-@@ -65,7 +65,11 @@ import { getPassthroughProviders } from "@omniroute/open-sse/config/providerRegi
+@@ -67,7 +67,11 @@ import { getPassthroughProviders } from "@omniroute/open-sse/config/providerRegi
  import * as log from "../utils/logger";
  import { checkAndRefreshToken } from "../services/tokenRefresh";
  import { createHookContext, runHooks, initPreRequestRegistry } from "@/lib/middleware/registry";
@@ -414,7 +414,7 @@ index a4186acb..74f388c8 100644
  import { rejectPeerRequest } from "@/shared/resilience/peerRouting";
  import { isRuntimeProviderRetirementError } from "@/shared/constants/providerRetirement";
  import { isCommonChatGptWebRetirementError } from "@/shared/constants/chatgptWebRetirement";
-@@ -1272,6 +1276,17 @@ async function handleChatImplementation(
+@@ -1384,6 +1388,17 @@ async function handleChatImplementation(
      }
      comboPreselectedCredentials.clear();
  
