@@ -8,6 +8,7 @@ import { createJev, buildPayload, askText } from "./lib/jev.mjs";
 import { createHealth } from "./lib/health.mjs";
 import { conversationKey, isFresh, createSessions, hash } from "./lib/sessions.mjs";
 import { createLog } from "./lib/decision-log.mjs";
+import { compileRules, matchRule } from "./lib/rules.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEADLINE_MS = 3500; // OmniRoute kills the child at 5 s and never respawns it
@@ -21,6 +22,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
   const jevClient = jev ?? createJev();
   let health = createHealth({ now, log: (r) => log(r) });
   let healthCfg = "";
+  let rulesFor = null, rules = []; // compiled rules, rebuilt when the policy object is reloaded
 
   // Jev: shadow = ask in the background and only log; on = wait (<= deadline) and lead with a confident pick.
   function jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead }) {
@@ -62,9 +64,18 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     const prev = fresh ? null : sessions.get(key, now());
     const f = factsSrc.get(policy);
     let preferred = prev?.head ?? null;
+    if (rulesFor !== policy) { rulesFor = policy; rules = compileRules(policy, (r) => log(r)); }
+    // A routing rule decides a fresh request by its words (law, medicine, finance ...) and Jev is not asked; a continuing request keeps its head.
+    const rule = fresh ? matchRule(rules, pool, askText(body, 4000)) : null;
+    let ruleInfo;
+    if (rule) {
+      const el = eligibleIds({ pool, policy, facts: f, req, health });
+      const lead = rule.prefer.filter((id) => el.main.includes(id) && !el.cooling.includes(id));
+      if (lead.length) { preferred = lead; ruleInfo = { name: rule.name, lead }; }
+    }
     let { models, excluded, nofit, cooling } = buildList({ pool, policy, facts: f, req, preferred, health });
     let jevInfo;
-    const step = models.length ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0] }) : null;
+    const step = models.length && !ruleInfo ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0] }) : null;
     if (step?.mode === "on") {
       const out = await step.promise;
       if (out?.res.ok && out.res.confidence >= out.thr) {
@@ -76,9 +87,9 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     sessions.set(key, { head: models[0] }, now());
     log({
       event: "decision", id: ctx.requestId ?? null, pool, conv: hash(key), fresh, est_tokens: req.tokens, reserve: req.reserve,
-      tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode, demoted: cooling?.length ? cooling : undefined,
+      tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, rule: ruleInfo, jev: jevInfo, jev_mode: step?.mode, demoted: cooling?.length ? cooling : undefined,
     });
-    return { models, reason: `${jevInfo ? "jev" : "static"}:${pool}${fresh ? "" : ":cont"}` };
+    return { models, reason: `${ruleInfo ? "rule:" + ruleInfo.name : jevInfo ? "jev" : "static"}:${pool}${fresh ? "" : ":cont"}` };
   }
 
   // Health knobs live in policy.health; changing them keeps what was learned (only the thresholds change).

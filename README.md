@@ -8,6 +8,7 @@ An OmniRoute plugin that picks the model for `free` / `paid` requests, plus the 
 - `scripts/` — `latest-upstream-tag.sh`, `apply-patches.sh` (drops a patch upstream already has; exit 3 on conflict), `build-image.sh <tag> [--push]`.
 - `.github/workflows/build.yml` — daily: newest upstream tag → patch → plugin tests → amd64 `runner-web` image → `ghcr.io/<owner>/omniroute:<ver>-jev<rev>` with provenance and SBOM. Conflict → issue; previous image stays live.
 - `deploy/docker-compose.example.yml` — production compose, digest-pinned, plugin dir mounted.
+- `plugin/lib/rules.mjs` — routing rules in `policy.json` (`rules`): a fresh request whose words match a rule leads with the rule's `prefer` models (those eligible for the request, in order) and Jev is not asked; no eligible model or no match = the normal choice. `plugin/ops/rules-check.mjs <policy.json>` runs sample requests through the real router and shows which rule took them.
 - `plugin/ops/` — one-off OmniRoute config scripts (`register-models.py`, `recreate-combos.py`, `split-ocpaid.py`, `set-request-queue.py`), dry run by default.
 - `plugin/report.mjs` — shadow-mode evaluation of Jev against the static order (`node plugin/report.mjs plugin/decisions.jsonl`).
 - `JEV_REV` — bump when `patches/` or the build changes without an upstream release (image tag `<ver>-jev<rev>`).

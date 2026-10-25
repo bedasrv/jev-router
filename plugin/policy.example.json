@@ -1,6 +1,14 @@
 {
  "_comment": "Order is data: strongest/cheapest-capable first, edited by the owner. Facts come from the listing sources, overlaid by models{}. See spec \u00a74.",
  "version": 1,
+ "rules": [
+  {
+   "name": "example",
+   "pools": ["paid"],
+   "match": ["\\b(some|words)\\b"],
+   "prefer": ["prefix/model-a", "prefix/model-b"]
+  }
+ ],
  "log_file": "decisions.jsonl",
  "limits": {
   "max_main": 3,

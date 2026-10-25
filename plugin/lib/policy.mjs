@@ -28,4 +28,5 @@ export function validate(p) {
   }
   if (p.models && typeof p.models !== "object") throw new Error("models must be an object");
   if (p.denylist && !Array.isArray(p.denylist)) throw new Error("denylist must be an array");
+  if (p.rules !== undefined && !Array.isArray(p.rules)) throw new Error("rules must be an array");
 }

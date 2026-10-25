@@ -40,7 +40,9 @@ export function buildList({ pool, policy, facts, req, preferred = null, health =
   const maxMain = (pool === "free" ? lim.max_main_free : null) ?? lim.max_main ?? 3, maxSpill = lim.max_spill ?? 2;
   const { main, spill, excluded, cooling } = eligibleIds({ pool, policy, facts, req, health });
   // a sticky/Jev preference never outranks a member we know is failing right now
-  if (preferred && main.includes(preferred) && !cooling.includes(preferred)) main.splice(0, main.length, preferred, ...main.filter((x) => x !== preferred));
+  // `preferred` is one id or an ordered list (a routing rule's models); those that are eligible and not cooling lead, in that order
+  const lead = (Array.isArray(preferred) ? preferred : preferred ? [preferred] : []).filter((x, i, a) => main.includes(x) && !cooling.includes(x) && a.indexOf(x) === i);
+  if (lead.length) main.splice(0, main.length, ...lead, ...main.filter((x) => !lead.includes(x)));
 
   let models;
   if (!main.length && !spill.length) {
