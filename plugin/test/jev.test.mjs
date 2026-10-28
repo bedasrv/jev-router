@@ -38,11 +38,26 @@ test("shadow: returns the static list at once, logs Jev's differing pick afterwa
 });
 test("on: a confident pick leads the list; low confidence and failures keep the static order", async () => {
   let { r } = mk(cfg({ mode: "on" }), stub(hit));
-  assert.equal((await r.onRoute(turn())).models[0], "b/p2");
+  let out = await r.onRoute(turn());
+  assert.equal(out.models[0], "b/p2");
+  assert.equal(out.reason, "jev");
+  assert.equal(out.confidence, 0.85);
   ({ r } = mk(cfg({ mode: "on" }), stub({ ...hit, confidence: 0.2 })));
-  assert.equal((await r.onRoute(turn())).models[0], "a/p1");
+  out = await r.onRoute(turn());
+  assert.equal(out.models[0], "a/p1");
+  assert.equal(out.reason, "static");
+  assert.equal(out.confidence, undefined);
   ({ r } = mk(cfg({ mode: "on" }), stub({ ok: false, error: "x", tried: [] })));
-  assert.equal((await r.onRoute(turn())).models[0], "a/p1");
+  out = await r.onRoute(turn());
+  assert.equal(out.models[0], "a/p1");
+  assert.equal(out.reason, "static");
+});
+test("reason is static:cont on a continuation turn", async () => {
+  const { r } = mk(cfg({ mode: "on" }), stub(hit));
+  const msgs = [{ role: "user", content: "go" }, { role: "assistant", content: "", tool_calls: [{}] }, { role: "tool", content: "ok" }];
+  const out = await r.onRoute({ model: "paid", headers: {}, body: { messages: msgs } });
+  assert.equal(out.reason, "static:cont");
+  assert.equal(out.confidence, undefined);
 });
 test("off / continuation / single candidate never call Jev", async () => {
   let calls = 0; const spy = { ask: async () => { calls++; return hit; } };

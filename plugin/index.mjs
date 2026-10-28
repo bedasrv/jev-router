@@ -78,7 +78,13 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       event: "decision", id: ctx.requestId ?? null, pool, conv: hash(key), fresh, est_tokens: req.tokens, reserve: req.reserve,
       tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode, demoted: cooling?.length ? cooling : undefined,
     });
-    return { models, reason: `${jevInfo ? "jev" : "static"}:${pool}${fresh ? "" : ":cont"}` };
+    // Response-header provenance (patch 0007): reason is jev | static[:cont]; confidence
+    // only when Jev's pick was applied. The pool itself is already the request model.
+    return {
+      models,
+      reason: jevInfo ? "jev" : fresh ? "static" : "static:cont",
+      ...(jevInfo ? { confidence: jevInfo.confidence } : {}),
+    };
   }
 
   // Health knobs live in policy.health; changing them keeps what was learned (only the thresholds change).

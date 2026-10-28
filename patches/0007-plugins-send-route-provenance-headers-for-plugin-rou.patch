@@ -1,0 +1,364 @@
+From 8f6615eb62c2fadebe13ab78dd92edc7023e7ce0 Mon Sep 17 00:00:00 2001
+From: jev-router-ci <jev-router-ci@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 13:24:01 +0700
+Subject: [PATCH] plugins: send route provenance headers for plugin-routed
+ combos
+
+When a plugin-routed combo dispatches the successful attempt, stamp the response head with x-omniroute-route (the exact combo target), x-omniroute-attempts (attempt count), x-router-reason (jev|static[:cont]) and x-router-confidence (0..1, only when Jev's pick was applied). The onRoute result now carries confidence alongside reason. Routing metadata only; failed combos get no route headers.
+---
+ src/lib/plugins/hooks.ts               |   7 +-
+ src/sse/handlers/chat.ts               |  16 +++-
+ src/sse/handlers/chat/pluginOnRoute.ts | 122 ++++++++++++++++++++++++-
+ tests/unit/plugins-onroute.test.ts     |  72 ++++++++++++++-
+ 4 files changed, 204 insertions(+), 13 deletions(-)
+
+diff --git a/src/lib/plugins/hooks.ts b/src/lib/plugins/hooks.ts
+index e874b539..aa578f3e 100644
+--- a/src/lib/plugins/hooks.ts
++++ b/src/lib/plugins/hooks.ts
+@@ -257,8 +257,13 @@ export interface PluginRouteContext {
+ 
+ export interface PluginRouteResult {
+   models?: string[];
+-  /** Free-form note recorded in the router log (never sent to the client). */
++  /**
++   * Route provenance, echoed on the response as `x-router-reason`: `jev`, `static`,
++   * or `static:cont`. Anything else is ignored (never sent to the client).
++   */
+   reason?: string;
++  /** Jev's confidence (0..1) when its pick was applied; echoed as `x-router-confidence`. */
++  confidence?: number;
+ }
+ 
+ export interface PluginResult {
+diff --git a/src/sse/handlers/chat.ts b/src/sse/handlers/chat.ts
+index c6c2ea28..20bd05b4 100644
+--- a/src/sse/handlers/chat.ts
++++ b/src/sse/handlers/chat.ts
+@@ -71,6 +71,7 @@ import {
+   runPluginOnRouteHook,
+   buildPluginRouteCombo,
+   emitPluginRouteResult,
++  withPluginRouteHeaders,
+ } from "./chat/pluginOnRoute";
+ import { rejectPeerRequest } from "@/shared/resilience/peerRouting";
+ import { isRuntimeProviderRetirementError } from "@/shared/constants/providerRetirement";
+@@ -1121,7 +1122,12 @@ async function handleChatImplementation(
+       isBlocked: (m) => isModelBlockedByPatterns(apiKeyInfo?.blockedModels, m),
+       log,
+     });
+-    if (routed) pluginRouteCombo = buildPluginRouteCombo(resolvedModelStr, routed, reqId);
++    if (routed) {
++      pluginRouteCombo = buildPluginRouteCombo(resolvedModelStr, routed.models, reqId, {
++        reason: routed.reason,
++        confidence: routed.confidence,
++      });
++    }
+   }
+ 
+   const autoRouting = await resolveAutoRoutingState(resolvedModelStr);
+@@ -1481,9 +1487,15 @@ async function handleChatImplementation(
+         });
+       } catch {}
+     }
++    // Route provenance for the streamed head: only when THIS plugin-routed combo served the
++    // request, and only after a successful attempt (withPluginRouteHeaders is a no-op otherwise).
++    const routedResponse =
++      pluginRouteCombo && combo?.id === pluginRouteCombo.id
++        ? withPluginRouteHeaders(response, pluginRouteCombo)
++        : response;
+     return withModalityBridgeHeader(
+       withConversationId(
+-        withCorrelationId(withSessionHeader(response, sessionId), reqId),
++        withCorrelationId(withSessionHeader(routedResponse, sessionId), reqId),
+         conversationId
+       ),
+       modalityBridgeHeader
+diff --git a/src/sse/handlers/chat/pluginOnRoute.ts b/src/sse/handlers/chat/pluginOnRoute.ts
+index db6e6508..84c9c8ea 100644
+--- a/src/sse/handlers/chat/pluginOnRoute.ts
++++ b/src/sse/handlers/chat/pluginOnRoute.ts
+@@ -7,7 +7,11 @@
+  * Fail-open: no plugin, no answer, or any error leaves routing exactly as it was.
+  */
+ 
+-import { createInvocationId, getComboTrace } from "@omniroute/open-sse/services/combo/decisionTrace.ts";
++import {
++  createInvocationId,
++  getComboTrace,
++  type ComboTrace,
++} from "@omniroute/open-sse/services/combo/decisionTrace.ts";
+ 
+ type LoggerLike =
+   | {
+@@ -18,6 +22,25 @@ type LoggerLike =
+   | null
+   | undefined;
+ 
++type PluginRouteMetadata = {
++  reason?: string;
++  confidence?: number;
++};
++
++/** The plugin's answer after API-key filtering. `reason`/`confidence` are routing provenance. */
++export interface PluginRouteSelection extends PluginRouteMetadata {
++  models: string[];
++}
++
++/**
++ * Combo shape used by the response-header helper. The provenance fields never leave this process
++ * except as the two allowlisted `x-router-*` headers.
++ */
++type PluginRouteComboLike = PluginRouteMetadata & {
++  traceInvocationId?: string;
++  models: Array<{ model: string }>;
++};
++
+ export const MAX_PLUGIN_ROUTE_MODELS = 12;
+ 
+ export async function runPluginOnRouteHook(args: {
+@@ -32,7 +55,7 @@ export async function runPluginOnRouteHook(args: {
+    */
+   isBlocked?: (model: string) => Promise<boolean>;
+   log?: LoggerLike;
+-}): Promise<string[] | null> {
++}): Promise<PluginRouteSelection | null> {
+   try {
+     const { runOnRoute } = await import("@/lib/plugins/hooks");
+     const result = await runOnRoute({
+@@ -58,7 +81,11 @@ export async function runPluginOnRouteHook(args: {
+       "PLUGIN",
+       `onRoute: ${args.model} → [${models.join(", ")}]${result.reason ? ` (${result.reason})` : ""}`
+     );
+-    return models;
++    return {
++      models,
++      ...(typeof result.reason === "string" ? { reason: result.reason } : {}),
++      ...(typeof result.confidence === "number" ? { confidence: result.confidence } : {}),
++    };
+   } catch (err) {
+     args.log?.debug?.(
+       "PLUGIN",
+@@ -69,7 +96,12 @@ export async function runPluginOnRouteHook(args: {
+ }
+ 
+ /** Same document shape as a stored priority combo, never persisted. */
+-export function buildPluginRouteCombo(requestedModel: string, models: string[], requestId: string) {
++export function buildPluginRouteCombo(
++  requestedModel: string,
++  models: string[],
++  requestId: string,
++  metadata: PluginRouteMetadata = {}
++) {
+   return {
+     id: `plugin-route-${requestId}`,
+     name: requestedModel,
+@@ -85,6 +117,9 @@ export function buildPluginRouteCombo(requestedModel: string, models: string[],
+     config: { maxRetries: 0 },
+     // lets chat.ts read this invocation's per-attempt outcomes back for onRouteResult
+     traceInvocationId: createInvocationId(),
++    // Route provenance for the response head; never persisted with the combo.
++    routeReason: typeof metadata.reason === "string" ? metadata.reason : undefined,
++    routeConfidence: typeof metadata.confidence === "number" ? metadata.confidence : undefined,
+     isHidden: true,
+     isActive: true,
+     sortOrder: 0,
+@@ -92,6 +127,83 @@ export function buildPluginRouteCombo(requestedModel: string, models: string[],
+   };
+ }
+ 
++/** Allowlist `jev`, `static`, `static:cont`; anything else is omitted (never echoed). */
++function normalizeRouteReason(value: unknown): string | null {
++  if (typeof value !== "string") return null;
++  const reason = value.trim();
++  return reason === "jev" || reason === "static" || reason === "static:cont" ? reason : null;
++}
++
++/** 0..1 only; rounded to three decimals to keep the header stable (warslop parses basis points). */
++function normalizeRouteConfidence(value: unknown): string | null {
++  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) return null;
++  return String(Math.round(value * 1000) / 1000);
++}
++
++function safeHeaderValue(value: unknown): string | null {
++  if (typeof value !== "string") return null;
++  const trimmed = value.trim();
++  if (!trimmed || trimmed.length > 512 || /[\r\n]/.test(trimmed)) return null;
++  return trimmed;
++}
++
++/**
++ * Route provenance for a successful plugin-routed combo: the exact dispatched target, how many
++ * attempts ran, and the plugin's reason/confidence. Only routing metadata — never a body or key.
++ * The header map is empty until the combo has a successful outcome, so failed requests keep their
++ * existing headers.
++ */
++export function buildPluginRouteHeaders(
++  combo: PluginRouteComboLike | null | undefined,
++  trace?: ComboTrace | null
++): Record<string, string> {
++  if (!combo) return {};
++  const invocation = trace ?? (combo.traceInvocationId ? getComboTrace(combo.traceInvocationId) : null);
++  const outcomes = invocation?.outcomes ?? [];
++  const success = [...outcomes].reverse().find((o) => o.ok);
++  const target = safeHeaderValue(success?.target);
++  if (!target) return {};
++
++  const headers: Record<string, string> = {
++    "x-omniroute-route": target,
++    "x-omniroute-attempts": String(outcomes.length),
++  };
++  const reason = normalizeRouteReason(combo.routeReason);
++  if (reason) {
++    headers["x-router-reason"] = reason;
++    // Confidence is meaningful only when Jev's pick was the one applied.
++    const confidence = reason === "jev" ? normalizeRouteConfidence(combo.routeConfidence) : null;
++    if (confidence) headers["x-router-confidence"] = confidence;
++  }
++  return headers;
++}
++
++/** Add the route headers to a Response before its head is committed. Never throws. */
++export function withPluginRouteHeaders<T extends Response | null | undefined>(
++  response: T,
++  combo: PluginRouteComboLike | null | undefined
++): T | Response {
++  if (!response) return response;
++  try {
++    const headers = buildPluginRouteHeaders(combo);
++    if (Object.keys(headers).length === 0) return response;
++    try {
++      for (const [name, value] of Object.entries(headers)) response.headers.set(name, value);
++      return response;
++    } catch {
++      const cloned = new Response(response.body, {
++        status: response.status,
++        statusText: response.statusText,
++        headers: response.headers,
++      });
++      for (const [name, value] of Object.entries(headers)) cloned.headers.set(name, value);
++      return cloned;
++    }
++  } catch {
++    return response;
++  }
++}
++
+ /**
+  * onRouteResult: after the plugin-routed combo finished, tell the plugin how each dispatched target
+  * went (HTTP status + allowlisted kind, never an error body) and which targets OmniRoute skipped.
+@@ -100,7 +212,7 @@ export function buildPluginRouteCombo(requestedModel: string, models: string[],
+ export function emitPluginRouteResult(args: {
+   requestId: string;
+   requestedModel: string;
+-  combo: { traceInvocationId?: string; models: Array<{ model: string }> };
++  combo: PluginRouteComboLike;
+   response: { status: number };
+   log?: LoggerLike;
+ }): void {
+diff --git a/tests/unit/plugins-onroute.test.ts b/tests/unit/plugins-onroute.test.ts
+index 06bc8c8d..255e897d 100644
+--- a/tests/unit/plugins-onroute.test.ts
++++ b/tests/unit/plugins-onroute.test.ts
+@@ -18,8 +18,10 @@ import {
+ } from "../../open-sse/services/combo/decisionTrace.ts";
+ import {
+   buildPluginRouteCombo,
++  buildPluginRouteHeaders,
+   emitPluginRouteResult,
+   runPluginOnRouteHook,
++  withPluginRouteHeaders,
+   MAX_PLUGIN_ROUTE_MODELS,
+ } from "../../src/sse/handlers/chat/pluginOnRoute.ts";
+ 
+@@ -56,15 +58,17 @@ test("runOnRoute returns null when every handler declines", async () => {
+   assert.equal(await runOnRoute(ctx), null);
+ });
+ 
+-test("runPluginOnRouteHook dedupes and caps the list", async () => {
++test("runPluginOnRouteHook dedupes and caps the list, carrying reason/confidence", async () => {
+   const many = Array.from({ length: 30 }, (_, i) => `p/m${i}`);
+-  registerHook("onRoute", "p", () => ({ models: ["p/m0", ...many] }), 1);
++  registerHook("onRoute", "p", () => ({ models: ["p/m0", ...many], reason: "jev", confidence: 0.87 }), 1);
+   const out = await runPluginOnRouteHook({
+     requestId: "r2", body: {}, model: "free", apiKeyInfo: null,
+   });
+-  assert.equal(out?.length, MAX_PLUGIN_ROUTE_MODELS);
+-  assert.equal(new Set(out).size, out?.length);
+-  assert.equal(out?.[0], "p/m0");
++  assert.equal(out?.models.length, MAX_PLUGIN_ROUTE_MODELS);
++  assert.equal(new Set(out?.models).size, out?.models.length);
++  assert.equal(out?.models[0], "p/m0");
++  assert.equal(out?.reason, "jev");
++  assert.equal(out?.confidence, 0.87);
+ });
+ 
+ test("buildPluginRouteCombo has stored priority-combo shape, named after the request", () => {
+@@ -82,6 +86,64 @@ test("buildPluginRouteCombo carries a trace invocation id", () => {
+   assert.notEqual(a.traceInvocationId, b.traceInvocationId);
+ });
+ 
++test("buildPluginRouteHeaders: successful target, attempt count, jev reason and confidence", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x", "b/y"], "r8", { reason: "jev", confidence: 0.8765 });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, { target: "a/x", ok: false, status: 502, kind: "provider", latencyMs: 80 });
++  recordComboOutcome(id, { target: "b/y", ok: true, status: 200, kind: null, latencyMs: 900 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "b/y",
++    "x-omniroute-attempts": "2",
++    "x-router-reason": "jev",
++    "x-router-confidence": "0.877",
++  });
++});
++
++test("buildPluginRouteHeaders: static keeps the reason but never the confidence", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x"], "r9", { reason: "static:cont", confidence: 0.9 });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 10 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "a/x",
++    "x-omniroute-attempts": "1",
++    "x-router-reason": "static:cont",
++  });
++});
++
++test("buildPluginRouteHeaders: no success, unknown reason or bad confidence adds nothing unsafe", () => {
++  const combo = buildPluginRouteCombo("free", ["a/x"], "r10", { reason: "jev:paid", confidence: 2 });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "free" });
++  recordComboOutcome(id, { target: "a/x", ok: false, status: 403, kind: "auth", latencyMs: 10 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {}); // no successful attempt
++  recordComboOutcome(id, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 20 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "a/x",
++    "x-omniroute-attempts": "2",
++  }); // reason not in the allowlist, confidence out of range
++});
++
++test("withPluginRouteHeaders stamps a Response and leaves failed/foreign combos untouched", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x"], "r11", { reason: "static" });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 10 });
++  const response = withPluginRouteHeaders(new Response("ok"), combo);
++  assert.equal(response.headers.get("x-omniroute-route"), "a/x");
++  assert.equal(response.headers.get("x-omniroute-attempts"), "1");
++  assert.equal(response.headers.get("x-router-reason"), "static");
++  assert.equal(response.headers.get("x-router-confidence"), null);
++
++  const other = buildPluginRouteCombo("paid", ["b/y"], "r12", { reason: "jev", confidence: 0.9 });
++  startComboTrace(String(other.traceInvocationId), { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(String(other.traceInvocationId), { target: "b/y", ok: false, status: 500, kind: "provider", latencyMs: 10 });
++  const failed = withPluginRouteHeaders(new Response("bad", { status: 502 }), other);
++  assert.equal(failed.headers.get("x-omniroute-route"), null);
++  assert.equal(failed.headers.get("x-router-reason"), null);
++});
++
+ test("recordComboOutcome stores status/kind per attempt, in order", () => {
+   startComboTrace("inv-1", { strategy: "priority", comboName: "free" });
+   recordComboOutcome("inv-1", { target: "ocfree/x", ok: false, status: 403, kind: "auth", latencyMs: 120 });
+-- 
+2.47.3
+
