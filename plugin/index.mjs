@@ -40,7 +40,9 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
         createLog(path.resolve(path.dirname(policyFile), cfg.sample_file))({ id: ctx.requestId ?? null, pool, ask: payload.state.request.slice(0, cfg.sample_chars ?? 300), tools: req.usesTools,
           static_head: staticHead, jev_pick: pick, confidence: Number(res.confidence.toFixed(3)), shown: shown.map((id, n) => ({ id, desc: payload.questions.model.criteria[payload.ids[n]] })) });
       }
-      log({ event: "jev", id: ctx.requestId ?? null, mode: cfg.mode, pool, conv: hash(key), ok: res.ok, source: res.source, latency_ms: res.latency_ms, shown,
+      const confident = res.ok && res.confidence >= thr;
+      const outcome = !res.ok ? "unavailable" : !confident ? "unconfident" : cfg.mode === "on" ? "applied" : "shadow";
+      log({ event: "jev", id: ctx.requestId ?? null, mode: cfg.mode, pool, conv: hash(key), ok: res.ok, outcome, source: res.source, jev_model: res.model, latency_ms: res.latency_ms, usage: res.usage, shown,
         pick, effort: res.ok ? res.effort : undefined, effort_confidence: res.ok ? res.effort_confidence : undefined,
         confidence: res.ok ? Number(res.confidence.toFixed(3)) : undefined, probabilities: res.ok ? res.probabilities : undefined,
         static_head: staticHead, differs: res.ok ? pick !== staticHead : undefined, would_apply: res.ok ? res.confidence >= thr && pick !== staticHead : undefined,

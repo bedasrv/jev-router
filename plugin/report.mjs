@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { dailyUsage } from "./lib/usage.mjs";
 
 const file = process.argv[2] ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "decisions.jsonl");
 const rows = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
@@ -21,3 +22,13 @@ const picks = {}; for (const r of ok) picks[r.pick] = (picks[r.pick] ?? 0) + 1;
 console.log("pick distribution:", Object.entries(picks).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, v]) => `${k.split("/").pop()}=${v}`).join(", "));
 const enough = ok.length >= 200, big = ok.length && differ.length / ok.length >= 0.15;
 console.log(`\nkill criterion: ${enough ? "enough data" : `need ${200 - ok.length} more answered shadow decisions`}; differs >= 15%: ${big ? "yes" : "no"}; hand-label 50 from shadow-samples.jsonl (set jev.sample_file) before enabling mode "on".`);
+const days = Object.entries(dailyUsage(rows));
+if (days.length) {
+  console.log("\njev usage per day (UTC):");
+  const $ = (v) => "$" + v.toFixed(5);
+  for (const [day, d] of days) {
+    const oc = Object.entries(d.outcomes).map(([k, v]) => `${k}=${v}`).join(" ");
+    const priced = d.priced ? `cost ${$(d.cost)} list ${$(d.list_cost)}` : "cost n/a";
+    console.log(`  ${day}: ${d.calls} calls (${oc}), tokens in ${d.prompt_tokens} (cached ${d.cached_tokens}) out ${d.completion_tokens}, ${priced}, models ${Object.keys(d.models).join(",") || "n/a"}`);
+  }
+}

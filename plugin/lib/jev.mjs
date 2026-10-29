@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { ABSTRACT_LEVELS, thinkingPhrase } from "./thinking.mjs";
+import { normalizeUsage } from "./usage.mjs";
 
 // Jev (TypeSafe classifier) client: one batched `choice` question over a shortlist, priority failover
 // across sources, per-source cooldown, an overall deadline. Never throws: returns {ok:false,error}.
@@ -112,30 +113,35 @@ export function createJev({ fetchImpl = fetch, readFile = (f) => fs.readFileSync
       if (left <= 50) break;
       if ((health.get(src.name)?.until ?? 0) > now()) { tried.push({ source: src.name, error: "cooling" }); continue; }
       const ts = now();
+      let usage, model = src.model;
       try {
         const headers = { "content-type": "application/json" };
         const key = keyOf(src);
         if (key) headers.authorization = "Bearer " + key;
         const r = await fetchImpl(src.url, { method: "POST", headers, body: JSON.stringify({ model: src.model, state: payload.state, questions: payload.questions }), signal: AbortSignal.timeout(Math.min(cfg.source_timeout_ms ?? 1200, left)) });
         if (!r.ok) throw new Error("HTTP " + r.status);
-        const answers = (await r.json())?.answers;
+        const j = await r.json();
+        // Usage and the served model id are numbers and an id only; a failed parse still bills, so keep it.
+        usage = normalizeUsage(j?.usage);
+        if (typeof j?.model === "string" && j.model) model = j.model.slice(0, 120);
+        const answers = j?.answers;
         const a = answers?.model, e = answers?.effort;
         const ids = payload.ids;
         if (!a || !ids.includes(a.choice) || typeof a.probabilities !== "object") throw new Error("malformed model answer");
         if (!e || !ABSTRACT_LEVELS.includes(e.choice)) throw new Error("malformed effort answer");
         health.delete(src.name);
         return {
-          ok: true, source: src.name, latency_ms: now() - ts,
+          ok: true, source: src.name, model, latency_ms: now() - ts, ...(usage ? { usage } : {}),
           choice: a.choice, index: ids.indexOf(a.choice), probabilities: a.probabilities, confidence: confidence(a.probabilities),
           effort: e.choice,
           ...(e.probabilities && typeof e.probabilities === "object" ? { effort_probabilities: e.probabilities, effort_confidence: confidence(e.probabilities) } : {}),
           tried,
         };
       } catch (e) {
-        cool(src.name); tried.push({ source: src.name, error: String(e?.message ?? e), latency_ms: now() - ts });
+        cool(src.name); tried.push({ source: src.name, error: String(e?.message ?? e), latency_ms: now() - ts, ...(usage ? { model, usage } : {}) });
       }
     }
-    return { ok: false, error: "no source answered", tried };
+    return { ok: false, error: "no source answered", latency_ms: now() - t0, tried };
   }
   return { ask, health };
 }
