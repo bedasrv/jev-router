@@ -1,0 +1,301 @@
+{
+ "ocpv/opencode-go/beam-free": {
+  "pool": "free",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "medium",
+   "high",
+   "xhigh",
+   "max"
+  ],
+  "off": false,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "override_evidence": "provider 400: reasoning_effort only supports max, xhigh, high, medium or low",
+  "control": "effort"
+ },
+ "ocpv/opencode-go/minimax-m3.1-flash-free": {
+  "pool": "free",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "medium",
+   "high",
+   "xhigh",
+   "max"
+  ],
+  "off": false,
+  "budget_tokens": false,
+  "mandatory": true,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "override_evidence": "provider 400: model requires adaptive thinking, reasoning effort none is not allowed",
+  "control": "effort"
+ },
+ "openrouter/minimax/minimax-m3.1-flash:free": {
+  "pool": "free",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "medium",
+   "high",
+   "xhigh",
+   "max"
+  ],
+  "off": false,
+  "budget_tokens": false,
+  "mandatory": true,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "override_evidence": "provider 400: reasoning is mandatory for this endpoint and cannot be disabled",
+  "control": "effort"
+ },
+ "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": {
+  "pool": "free",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "medium",
+   "high"
+  ],
+  "off": true,
+  "budget_tokens": true,
+  "mandatory": false,
+  "dead": false,
+  "top": "high",
+  "source": "models.dev",
+  "control": "effort"
+ },
+ "ocpv/opencode-go/longcat-2.5-preview-free": {
+  "pool": "free",
+  "param": null,
+  "kind": "toggle",
+  "levels": [],
+  "off": true,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": true,
+  "top": null,
+  "source": "models.dev",
+  "override_evidence": "402 endpoint unavailable, then 429 all credentials cooling down (probe round 1)",
+  "control": "toggle"
+ },
+ "ocgob/opencode-go/glm-5.3-flash": {
+  "pool": "paid",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "high",
+   "max"
+  ],
+  "off": false,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "control": "effort"
+ },
+ "ocgoa/opencode-go/deepseek-v4.1-flash": {
+  "pool": "paid",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "high",
+   "max"
+  ],
+  "off": false,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "control": "effort"
+ },
+ "ocgoa/opencode-go/qwen3.8-flash": {
+  "pool": "paid",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "medium",
+   "xhigh"
+  ],
+  "off": true,
+  "budget_tokens": true,
+  "mandatory": false,
+  "dead": false,
+  "top": "xhigh",
+  "source": "models.dev",
+  "control": "effort"
+ },
+ "ocgoa/opencode-go/muse-spark-1.3-contributor": {
+  "pool": "paid",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "minimal",
+   "low",
+   "medium",
+   "high",
+   "xhigh"
+  ],
+  "off": false,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": "xhigh",
+  "source": "models.dev",
+  "control": "effort"
+ },
+ "openrouter/deepseek/deepseek-v4.1-flash-1017": {
+  "pool": "paid",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "high",
+   "max"
+  ],
+  "off": true,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "control": "effort"
+ },
+ "openrouter/z-ai/glm-5.3-flash": {
+  "pool": "paid",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "high",
+   "max"
+  ],
+  "off": false,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "control": "effort"
+ },
+ "openrouter/inclusionai/ling-3.1-flash": {
+  "pool": "paid",
+  "param": null,
+  "kind": "toggle",
+  "levels": [],
+  "off": true,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": null,
+  "source": "models.dev",
+  "override_evidence": "openrouter supported_parameters has no reasoning_effort",
+  "control": "toggle"
+ },
+ "ocgob/opencode-go/mimo-v2.6-flash": {
+  "pool": "paid",
+  "param": null,
+  "kind": "none",
+  "levels": [],
+  "off": true,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": null,
+  "source": "models.dev",
+  "override_evidence": "models.dev lists no controls, but reasoning_effort=none gave 6 output tokens (round 2)",
+  "control": "off-only"
+ },
+ "ocgob/opencode-go/gpt-6-luna": {
+  "pool": "paid",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "medium",
+   "high",
+   "xhigh",
+   "max"
+  ],
+  "off": true,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "control": "effort"
+ },
+ "openrouter/anthropic/claude-haiku-5.5": {
+  "pool": "paid",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "medium",
+   "high",
+   "xhigh",
+   "max"
+  ],
+  "off": true,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "control": "effort"
+ },
+ "openrouter/meta/muse-spark-1.3-contributor": {
+  "pool": "paid",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "minimal",
+   "low",
+   "medium",
+   "high",
+   "xhigh",
+   "max"
+  ],
+  "off": false,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "control": "effort"
+ },
+ "openrouter/openai/gpt-6-luna": {
+  "pool": "paid",
+  "param": "reasoning_effort",
+  "kind": "effort",
+  "levels": [
+   "low",
+   "medium",
+   "high",
+   "xhigh",
+   "max"
+  ],
+  "off": true,
+  "budget_tokens": false,
+  "mandatory": false,
+  "dead": false,
+  "top": "max",
+  "source": "models.dev",
+  "control": "effort"
+ }
+}

@@ -1,5 +1,5 @@
 {
- "_comment": "Order is data: strongest/cheapest-capable first, edited by the owner. Facts come from the listing sources, overlaid by models{}. See spec \u00a74.",
+ "_comment": "Order is data: strongest/cheapest-capable first, edited by the owner. Facts come from the listing sources, overlaid by models{}. models[*].thinking is generated from warslop's effort-table.json + effort-policy-draft.json (trivial|normal|hard|frontier -> native tier or null=default); missing = unknown (omit the field). Run plugin/ops/apply-effort-policy.mjs. See spec §7.4.",
  "version": 1,
  "log_file": "decisions.jsonl",
  "limits": {
@@ -49,12 +49,10 @@
    "ocgob/opencode-go/kimi-k2.6",
    "ocgoa/opencode-go/deepseek-v4-flash",
    "ocgob/opencode-go/minimax-m3",
-   "ocpv/opencode-go/longcat-2.5-preview-free",
    "ocpv/opencode-go/cat-jam-free"
   ],
   "free": [
    "ocfree/opencode/space-bunny-free",
-   "ocpv/opencode-go/longcat-2.5-preview-free",
    "ocfree/opencode/muse-spark-1.3-contributor-free",
    "ocfree/opencode/ling-3.1-flash-free",
    "ocfree/opencode/nemotron-3.5-lightning-free",
@@ -78,136 +76,450 @@
   "ocgoa/opencode-go/deepseek-v4.1-flash": {
    "tools": true,
    "vision": true,
-   "traits": "budget price; fast; strong at code and tool use"
+   "traits": "budget price; fast; strong at code and tool use",
+   "thinking": {
+    "control": "effort",
+    "values": [
+     "low",
+     "high",
+     "max"
+    ],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": "low",
+     "normal": null,
+     "hard": "high",
+     "frontier": "high"
+    }
+   }
   },
   "ocgob/opencode-go/glm-5.3": {
    "tools": true,
    "vision": false,
-   "traits": "mid price; strong general and coding model; no image input"
+   "traits": "mid price; strong general and coding model; no image input",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgoa/opencode-go/kimi-k3": {
    "tools": true,
    "vision": true,
-   "traits": "mid price; strong at agentic coding and long tool chains"
+   "traits": "mid price; strong at agentic coding and long tool chains",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgob/opencode-go/deepseek-v4-pro": {
    "tools": true,
    "vision": false,
-   "traits": "mid price; strong reasoning and code; slower; no image input"
+   "traits": "mid price; strong reasoning and code; slower; no image input",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgoa/opencode-go/qwen3.8-flash": {
    "tools": true,
    "vision": true,
-   "traits": "budget price; fast; good general model"
+   "traits": "budget price; fast; good general model",
+   "thinking": {
+    "control": "effort",
+    "values": [
+     "none",
+     "low",
+     "medium",
+     "xhigh"
+    ],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": "none",
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgob/opencode-go/gpt-6-luna": {
    "tools": true,
    "vision": true,
    "context_length": 1050000,
-   "traits": "premium price; strong all-round reasoning and writing"
+   "traits": "premium price; strong all-round reasoning and writing",
+   "thinking": {
+    "control": "effort",
+    "values": [
+     "none",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": "none",
+     "normal": null,
+     "hard": "high",
+     "frontier": "high"
+    }
+   }
   },
   "ocgoa/opencode-go/grok-4.7": {
    "tools": true,
    "vision": true,
    "context_length": 500000,
-   "traits": "mid price; strong general reasoning; fast"
+   "traits": "mid price; strong general reasoning; fast",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgob/opencode-go/kimi-k2.7-code": {
    "tools": true,
    "vision": true,
-   "traits": "mid price; specialised for code editing and tool use"
+   "traits": "mid price; specialised for code editing and tool use",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgoa/opencode-go/qwen3.8-max": {
    "tools": true,
    "vision": true,
-   "traits": "premium price; deep reasoning; strongest of its family"
+   "traits": "premium price; deep reasoning; strongest of its family",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgob/opencode-go/glm-5.3-flash": {
    "tools": true,
    "vision": true,
-   "traits": "budget price; fast; light general model"
+   "traits": "budget price; fast; light general model",
+   "thinking": {
+    "control": "effort",
+    "values": [
+     "low",
+     "high",
+     "max"
+    ],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": "low",
+     "normal": null,
+     "hard": "high",
+     "frontier": "max"
+    }
+   }
   },
   "ocgoa/opencode-go/grok-4.6": {
    "tools": true,
    "vision": true,
-   "traits": "mid price; solid general model"
+   "traits": "mid price; solid general model",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgob/opencode-go/gpt-5.6-luna": {
    "tools": true,
    "vision": true,
-   "traits": "premium price; strong reasoning"
+   "traits": "premium price; strong reasoning",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgoa/opencode-go/glm-5.2": {
    "tools": true,
    "vision": false,
-   "traits": "budget price; older general and coding model; no image input"
+   "traits": "budget price; older general and coding model; no image input",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgob/opencode-go/kimi-k2.6": {
    "tools": true,
    "vision": true,
-   "traits": "budget price; capable coding model"
+   "traits": "budget price; capable coding model",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgoa/opencode-go/deepseek-v4-flash": {
    "tools": true,
    "vision": false,
-   "traits": "budget price; fast; simple tasks; no image input"
+   "traits": "budget price; fast; simple tasks; no image input",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocgob/opencode-go/minimax-m3": {
    "tools": true,
    "vision": null,
-   "traits": "budget price; agentic tool use; verbose reasoning"
-  },
-  "ocpv/opencode-go/longcat-2.5-preview-free": {
-   "tools": true,
-   "vision": true,
-   "context_length": 1000000,
-   "traits": "free preview; light general model"
+   "traits": "budget price; agentic tool use; verbose reasoning",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocpv/opencode-go/cat-jam-free": {
    "tools": null,
    "vision": null,
    "context_length": 262144,
-   "traits": "free preview; light model"
+   "traits": "free preview; light model",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocfree/opencode/space-bunny-free": {
    "tools": true,
    "vision": null,
-   "traits": "free; roomy context; general model"
+   "traits": "free; roomy context; general model",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocfree/opencode/muse-spark-1.3-contributor-free": {
    "tools": true,
    "vision": true,
-   "traits": "free; general model"
+   "traits": "free; general model",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocfree/opencode/ling-3.1-flash-free": {
    "tools": true,
    "vision": true,
-   "traits": "free; fast; light model"
+   "traits": "free; fast; light model",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocfree/opencode/nemotron-3.5-lightning-free": {
    "tools": true,
    "vision": true,
-   "traits": "free; fast; light model"
+   "traits": "free; fast; light model",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocfree/opencode/mimo-v2.6-flash-free": {
    "tools": true,
    "vision": true,
-   "traits": "free; fast; light model"
+   "traits": "free; fast; light model",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocfree/opencode/muse-spark-1.2-contributor-free": {
    "tools": true,
    "vision": true,
-   "traits": "free; general model; older"
+   "traits": "free; general model; older",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "ocfree/opencode/cat-jam-free": {
    "tools": null,
    "vision": null,
-   "traits": "free preview; light model"
+   "traits": "free preview; light model",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   },
   "mscopilot/default": {
    "tools": null,
    "vision": null,
-   "traits": "last resort general model"
+   "traits": "last resort general model",
+   "thinking": {
+    "control": "none",
+    "values": [],
+    "default": null,
+    "budget": null,
+    "map": {
+     "trivial": null,
+     "normal": null,
+     "hard": null,
+     "frontier": null
+    }
+   }
   }
  },
  "last_resort": {

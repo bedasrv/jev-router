@@ -1,0 +1,247 @@
+From 5b0da6645b32ad7539a3e5d0adbeda5dfaa5ec1c Mon Sep 17 00:00:00 2001
+From: jev-router-ci <jev-router-ci@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 13:00:20 +0700
+Subject: [PATCH] plugins: apply the onRoute thinking selection to the request
+ body
+
+A plugin may return {thinking:{control,native}} from onRoute: effort writes reasoning_effort, budget writes thinking.budget_tokens, toggle writes thinking.enabled/disabled. The native value is the model's own vocabulary (the plugin maps/clamps it), conflicting effort fields are removed, and the body is copied so combo targets never share mutation. Values are allowlisted; malformed selections are ignored.
+---
+ src/lib/plugins/hooks.ts               | 13 +++++++
+ src/sse/handlers/chat.ts               |  6 +++
+ src/sse/handlers/chat/pluginOnRoute.ts | 52 ++++++++++++++++++++++++++
+ tests/unit/plugins-onroute.test.ts     | 34 ++++++++++++++++-
+ 4 files changed, 104 insertions(+), 1 deletion(-)
+
+diff --git a/src/lib/plugins/hooks.ts b/src/lib/plugins/hooks.ts
+index aa578f3e..73c16c63 100644
+--- a/src/lib/plugins/hooks.ts
++++ b/src/lib/plugins/hooks.ts
+@@ -255,6 +255,17 @@ export interface PluginRouteContext {
+   headers?: Record<string, string | string[] | undefined>;
+ }
+ 
++/**
++ * One native thinking control the plugin wants applied to this request. The plugin maps its
++ * abstract off|low|medium|high choice to the chosen model's vocabulary; OmniRoute only writes
++ * the corresponding request field.
++ */
++export interface PluginThinkingSelection {
++  control: "effort" | "toggle";
++  /** effort: a level such as none/low/medium/high; toggle: off/on. */
++  value: string;
++}
++
+ export interface PluginRouteResult {
+   models?: string[];
+   /**
+@@ -264,6 +275,8 @@ export interface PluginRouteResult {
+   reason?: string;
+   /** Jev's confidence (0..1) when its pick was applied; echoed as `x-router-confidence`. */
+   confidence?: number;
++  /** Thinking effort/control to put on the request body (omit to leave the client's body alone). */
++  thinking?: PluginThinkingSelection;
+ }
+ 
+ export interface PluginResult {
+diff --git a/src/sse/handlers/chat.ts b/src/sse/handlers/chat.ts
+index 20bd05b4..f5f60b67 100644
+--- a/src/sse/handlers/chat.ts
++++ b/src/sse/handlers/chat.ts
+@@ -71,6 +71,7 @@ import {
+   runPluginOnRouteHook,
+   buildPluginRouteCombo,
+   emitPluginRouteResult,
++  applyPluginRouteThinking,
+   withPluginRouteHeaders,
+ } from "./chat/pluginOnRoute";
+ import { rejectPeerRequest } from "@/shared/resilience/peerRouting";
+@@ -1126,6 +1127,7 @@ async function handleChatImplementation(
+       pluginRouteCombo = buildPluginRouteCombo(resolvedModelStr, routed.models, reqId, {
+         reason: routed.reason,
+         confidence: routed.confidence,
++        thinking: routed.thinking,
+       });
+     }
+   }
+@@ -1137,6 +1139,10 @@ async function handleChatImplementation(
+   telemetry.startPhase("resolve");
+   let combo: any = pluginRouteCombo ?? (await getComboForModel(resolvedModelStr));
+   if (reasoningDecision?.targetCombo) combo = reasoningDecision.targetCombo;
++  // The plugin's chosen thinking control applies to the body every fallback attempt shares.
++  if (pluginRouteCombo && combo?.id === pluginRouteCombo.id) {
++    body = applyPluginRouteThinking(body, pluginRouteCombo.routeThinking);
++  }
+ 
+   // "auto" prefix fuzzy matching: "auto/fast" → "auto/best-fast", etc.
+   // parseModel splits "auto/fast" into provider="auto" which isn't a real provider.
+diff --git a/src/sse/handlers/chat/pluginOnRoute.ts b/src/sse/handlers/chat/pluginOnRoute.ts
+index 84c9c8ea..5d8c7581 100644
+--- a/src/sse/handlers/chat/pluginOnRoute.ts
++++ b/src/sse/handlers/chat/pluginOnRoute.ts
+@@ -22,9 +22,12 @@ type LoggerLike =
+   | null
+   | undefined;
+ 
++type PluginThinking = { control: "effort" | "toggle"; value: string };
++
+ type PluginRouteMetadata = {
+   reason?: string;
+   confidence?: number;
++  thinking?: PluginThinking;
+ };
+ 
+ /** The plugin's answer after API-key filtering. `reason`/`confidence` are routing provenance. */
+@@ -39,10 +42,23 @@ export interface PluginRouteSelection extends PluginRouteMetadata {
+ type PluginRouteComboLike = PluginRouteMetadata & {
+   traceInvocationId?: string;
+   models: Array<{ model: string }>;
++  routeThinking?: PluginThinking;
+ };
+ 
+ export const MAX_PLUGIN_ROUTE_MODELS = 12;
+ 
++/** Allowlist the wire shape; anything malformed is dropped rather than sent upstream. */
++function normalizePluginThinking(value: unknown): PluginThinking | null {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
++  const record = value as Record<string, unknown>;
++  const control = record.control;
++  if (control !== "effort" && control !== "toggle") return null;
++  const text = typeof record.value === "string" ? record.value.trim() : "";
++  if (!text || text.length > 32 || /[\r\n]/.test(text)) return null;
++  if (control === "toggle" && text !== "off" && text !== "on") return null;
++  return { control, value: text };
++}
++
+ export async function runPluginOnRouteHook(args: {
+   requestId: string;
+   body: unknown;
+@@ -81,10 +97,12 @@ export async function runPluginOnRouteHook(args: {
+       "PLUGIN",
+       `onRoute: ${args.model} → [${models.join(", ")}]${result.reason ? ` (${result.reason})` : ""}`
+     );
++    const thinking = normalizePluginThinking(result.thinking);
+     return {
+       models,
+       ...(typeof result.reason === "string" ? { reason: result.reason } : {}),
+       ...(typeof result.confidence === "number" ? { confidence: result.confidence } : {}),
++      ...(thinking ? { thinking } : {}),
+     };
+   } catch (err) {
+     args.log?.debug?.(
+@@ -120,6 +138,7 @@ export function buildPluginRouteCombo(
+     // Route provenance for the response head; never persisted with the combo.
+     routeReason: typeof metadata.reason === "string" ? metadata.reason : undefined,
+     routeConfidence: typeof metadata.confidence === "number" ? metadata.confidence : undefined,
++    routeThinking: normalizePluginThinking(metadata.thinking) ?? undefined,
+     isHidden: true,
+     isActive: true,
+     sortOrder: 0,
+@@ -127,6 +146,39 @@ export function buildPluginRouteCombo(
+   };
+ }
+ 
++/**
++ * Write the plugin's native thinking control into the request body. Mutates a copy, never the
++ * caller's object: the combo path may reuse the body for other targets. Conflicting effort
++ * fields are removed so one control wins; the plugin only sends a value the route is known to
++ * accept (its per-model map), so this is not a guess about the provider's enum.
++ */
++export function applyPluginRouteThinking<T>(body: T, thinking: unknown): T {
++  const t = normalizePluginThinking(thinking);
++  if (!body || typeof body !== "object" || Array.isArray(body) || !t) return body;
++  const next = { ...(body as Record<string, unknown>) };
++  const reasoning = next.reasoning && typeof next.reasoning === "object" && !Array.isArray(next.reasoning)
++    ? { ...(next.reasoning as Record<string, unknown>) }
++    : null;
++  delete reasoning?.effort;
++  if (reasoning && Object.keys(reasoning).length === 0) delete next.reasoning;
++  else if (reasoning) next.reasoning = reasoning;
++  if (next.output_config && typeof next.output_config === "object" && !Array.isArray(next.output_config)) {
++    const output = { ...(next.output_config as Record<string, unknown>) };
++    delete output.effort;
++    if (Object.keys(output).length === 0) delete next.output_config;
++    else next.output_config = output;
++  }
++
++  if (t.control === "effort") {
++    next.reasoning_effort = String(t.value);
++    delete next.thinking;
++    return next as T;
++  }
++  delete next.reasoning_effort;
++  next.thinking = { type: t.value === "off" ? "disabled" : "enabled" };
++  return next as T;
++}
++
+ /** Allowlist `jev`, `static`, `static:cont`; anything else is omitted (never echoed). */
+ function normalizeRouteReason(value: unknown): string | null {
+   if (typeof value !== "string") return null;
+diff --git a/tests/unit/plugins-onroute.test.ts b/tests/unit/plugins-onroute.test.ts
+index 255e897d..b12f8d52 100644
+--- a/tests/unit/plugins-onroute.test.ts
++++ b/tests/unit/plugins-onroute.test.ts
+@@ -17,6 +17,7 @@ import {
+   resetComboTraceStore,
+ } from "../../open-sse/services/combo/decisionTrace.ts";
+ import {
++  applyPluginRouteThinking,
+   buildPluginRouteCombo,
+   buildPluginRouteHeaders,
+   emitPluginRouteResult,
+@@ -60,7 +61,7 @@ test("runOnRoute returns null when every handler declines", async () => {
+ 
+ test("runPluginOnRouteHook dedupes and caps the list, carrying reason/confidence", async () => {
+   const many = Array.from({ length: 30 }, (_, i) => `p/m${i}`);
+-  registerHook("onRoute", "p", () => ({ models: ["p/m0", ...many], reason: "jev", confidence: 0.87 }), 1);
++  registerHook("onRoute", "p", () => ({ models: ["p/m0", ...many], reason: "jev", confidence: 0.87, thinking: { control: "effort", value: "high" } }), 1);
+   const out = await runPluginOnRouteHook({
+     requestId: "r2", body: {}, model: "free", apiKeyInfo: null,
+   });
+@@ -69,6 +70,7 @@ test("runPluginOnRouteHook dedupes and caps the list, carrying reason/confidence
+   assert.equal(out?.models[0], "p/m0");
+   assert.equal(out?.reason, "jev");
+   assert.equal(out?.confidence, 0.87);
++  assert.deepEqual(out?.thinking, { control: "effort", value: "high" });
+ });
+ 
+ test("buildPluginRouteCombo has stored priority-combo shape, named after the request", () => {
+@@ -86,6 +88,36 @@ test("buildPluginRouteCombo carries a trace invocation id", () => {
+   assert.notEqual(a.traceInvocationId, b.traceInvocationId);
+ });
+ 
++test("applyPluginRouteThinking writes effort and toggle without mutating input or max_tokens", () => {
++  const body: Record<string, any> = { model: "paid", max_tokens: 4096, messages: [], reasoning: { effort: "high", summary: "auto" }, output_config: { effort: "high" } };
++  assert.equal(applyPluginRouteThinking<Record<string, any>>({ model: "x" }, { control: "effort", value: "medium" }).reasoning_effort, "medium");
++  const effort = applyPluginRouteThinking(body, { control: "effort", value: "low" });
++  assert.equal(effort.reasoning_effort, "low");
++  assert.equal(effort.max_tokens, 4096); // output is never capped
++  assert.deepEqual(effort.reasoning, { summary: "auto" });
++  assert.equal(effort.output_config, undefined);
++  assert.equal(body.reasoning_effort, undefined); // copy only
++  assert.deepEqual(body.reasoning, { effort: "high", summary: "auto" });
++
++  const off = applyPluginRouteThinking<Record<string, any>>({ model: "x", max_tokens: 100, reasoning_effort: "high" }, { control: "toggle", value: "off" });
++  assert.deepEqual(off, { model: "x", max_tokens: 100, thinking: { type: "disabled" } });
++  const on = applyPluginRouteThinking<Record<string, any>>({ model: "x" }, { control: "toggle", value: "on" });
++  assert.deepEqual(on.thinking, { type: "enabled" });
++});
++
++test("applyPluginRouteThinking ignores malformed or budget-only controls", () => {
++  const body = { model: "x", reasoning_effort: "high" };
++  assert.equal(applyPluginRouteThinking(body, null), body);
++  assert.equal(applyPluginRouteThinking(body, { control: "max", value: "high" }), body);
++  assert.equal(applyPluginRouteThinking(body, { control: "toggle", value: "maybe" }), body);
++  assert.equal(applyPluginRouteThinking(body, { control: "budget", value: 4096 }), body); // omitted in v1
++});
++
++test("buildPluginRouteCombo carries the thinking control", () => {
++  const c = buildPluginRouteCombo("paid", ["a/x"], "r13", { thinking: { control: "effort", value: "medium" } });
++  assert.deepEqual(c.routeThinking, { control: "effort", value: "medium" });
++});
++
+ test("buildPluginRouteHeaders: successful target, attempt count, jev reason and confidence", () => {
+   const combo = buildPluginRouteCombo("paid", ["a/x", "b/y"], "r8", { reason: "jev", confidence: 0.8765 });
+   const id = String(combo.traceInvocationId);
+-- 
+2.47.3
+

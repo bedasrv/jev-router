@@ -5,6 +5,7 @@ import { createFacts } from "./lib/facts.mjs";
 import { inspectRequest } from "./lib/eligibility.mjs";
 import { buildList, eligibleIds } from "./lib/builder.mjs";
 import { createJev, buildPayload, askText } from "./lib/jev.mjs";
+import { applyThinkingToList } from "./lib/thinking.mjs";
 import { createHealth } from "./lib/health.mjs";
 import { conversationKey, isFresh, createSessions, hash } from "./lib/sessions.mjs";
 import { createLog } from "./lib/decision-log.mjs";
@@ -40,7 +41,8 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
           static_head: staticHead, jev_pick: pick, confidence: Number(res.confidence.toFixed(3)), shown: shown.map((id, n) => ({ id, desc: payload.questions.model.criteria[payload.ids[n]] })) });
       }
       log({ event: "jev", id: ctx.requestId ?? null, mode: cfg.mode, pool, conv: hash(key), ok: res.ok, source: res.source, latency_ms: res.latency_ms, shown,
-        pick, confidence: res.ok ? Number(res.confidence.toFixed(3)) : undefined, probabilities: res.ok ? res.probabilities : undefined,
+        pick, effort: res.ok ? res.effort : undefined, effort_confidence: res.ok ? res.effort_confidence : undefined,
+        confidence: res.ok ? Number(res.confidence.toFixed(3)) : undefined, probabilities: res.ok ? res.probabilities : undefined,
         static_head: staticHead, differs: res.ok ? pick !== staticHead : undefined, would_apply: res.ok ? res.confidence >= thr && pick !== staticHead : undefined,
         tried: res.ok && !res.tried.length ? undefined : res.tried });
       return { res, pick, thr };
@@ -64,19 +66,50 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     let preferred = prev?.head ?? null;
     let { models, excluded, nofit, cooling } = buildList({ pool, policy, facts: f, req, preferred, health });
     let jevInfo;
+    let desiredEffort = null, effortSource = null;
     const step = models.length ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0] }) : null;
     if (step?.mode === "on") {
       const out = await step.promise;
       if (out?.res.ok && out.res.confidence >= out.thr) {
         ({ models, excluded, nofit, cooling } = buildList({ pool, policy, facts: f, req, preferred: out.pick, health }));
-        jevInfo = { applied: out.pick, confidence: Number(out.res.confidence.toFixed(3)) };
+        jevInfo = { applied: out.pick, confidence: Number(out.res.confidence.toFixed(3)), effort: out.res.effort };
+        desiredEffort = out.res.effort;
+        effortSource = "jev";
       }
     }
+
+    // One abstract need per request; the head model decides the native value and the fallback
+    // list keeps only models where the exact same control+value applies. Continuations reuse the
+    // fresh task's need; a paid turn with no Jev answer falls back to normal (the provider default).
+    if (pool === "paid" && policy.jev?.mode === "on") {
+      if (!desiredEffort && !fresh && prev?.effort) { desiredEffort = prev.effort; effortSource = "session"; }
+      if (!desiredEffort) { desiredEffort = "normal"; effortSource = "default"; }
+    }
+    let effortInfo = null;
+    if (desiredEffort) {
+      const plan = applyThinkingToList({ models, abstract: desiredEffort, policy });
+      models = plan.models;
+      effortInfo = {
+        source: effortSource, need: desiredEffort, abstract: desiredEffort, model: models[0],
+        applied: plan.applied, control: plan.applied?.control ?? null, native: plan.applied?.native ?? null,
+        native_tier: plan.applied?.native ?? null,
+        clamped: !!plan.clamped, omitted: !!plan.omitted, reason: plan.reason ?? undefined,
+        dropped: plan.dropped?.length ? plan.dropped : undefined,
+      };
+      if (jevInfo) {
+        jevInfo.effort_applied = plan.applied ?? null;
+        jevInfo.effort_clamped = !!plan.clamped;
+        jevInfo.effort_omitted = !!plan.omitted;
+      }
+    } else if (pool === "free") {
+      effortInfo = { source: "free", need: null, abstract: null, model: models[0], applied: null, control: null, native: null, native_tier: null, clamped: false, omitted: true, reason: "free_pool" };
+    }
+
     if (!models.length) return undefined;
-    sessions.set(key, { head: models[0] }, now());
+    sessions.set(key, { head: models[0], effort: desiredEffort ?? null }, now());
     log({
       event: "decision", id: ctx.requestId ?? null, pool, conv: hash(key), fresh, est_tokens: req.tokens, reserve: req.reserve,
-      tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode, demoted: cooling?.length ? cooling : undefined,
+      tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode, effort: effortInfo, demoted: cooling?.length ? cooling : undefined,
     });
     // Response-header provenance (patch 0007): reason is jev | static[:cont]; confidence
     // only when Jev's pick was applied. The pool itself is already the request model.
@@ -84,6 +117,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       models,
       reason: jevInfo ? "jev" : fresh ? "static" : "static:cont",
       ...(jevInfo ? { confidence: jevInfo.confidence } : {}),
+      ...(effortInfo?.applied ? { thinking: effortInfo.applied } : {}),
     };
   }
 

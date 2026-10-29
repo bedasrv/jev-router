@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { validateThinking } from "./thinking.mjs";
 
 // policy.json is data: pool order, per-id facts, denylist, listing sources.
 // Hot-reloaded on mtime; an invalid file keeps the last good one.
@@ -28,4 +29,11 @@ export function validate(p) {
   }
   if (p.models && typeof p.models !== "object") throw new Error("models must be an object");
   if (p.denylist && !Array.isArray(p.denylist)) throw new Error("denylist must be an array");
+  // Missing thinking is allowed at runtime (unknown = control:none, omit the field); when an
+  // entry is present its shape is strict so a typo cannot silently change what goes on the wire.
+  for (const [id, m] of Object.entries(p.models ?? {})) {
+    if (m?.thinking === undefined) continue;
+    const err = validateThinking(m.thinking);
+    if (err) throw new Error(`models.${id}.${err}`);
+  }
 }

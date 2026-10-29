@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { ABSTRACT_LEVELS, thinkingPhrase } from "./thinking.mjs";
 
 // Jev (TypeSafe classifier) client: one batched `choice` question over a shortlist, priority failover
 // across sources, per-source cooldown, an overall deadline. Never throws: returns {ok:false,error}.
@@ -12,11 +13,13 @@ const words = (t) => String(t).replace(/[0-9]/g, "").replace(/\s+/g, " ").trim()
 export function describeCandidate(id, f, m) {
   const meta = typeof m === "string" ? { traits: m } : (m ?? {});
   const ctx = Number.isFinite(f?.context_length) ? f.context_length : 0;
-  if (!meta.good_at) return `${words(meta.traits ?? "general purpose model")}; ${windowClass(ctx)}`;
+  const thinking = thinkingPhrase(meta.thinking ?? f?.thinking);
+  if (!meta.good_at) return `${words(meta.traits ?? "general purpose model")}; ${windowClass(ctx)}; ${thinking}`;
   const out = { good_at: words(meta.good_at) };
   if (meta.weak_at) out.weak_at = words(meta.weak_at);
   out.cost = words(meta.cost ?? "unknown cost");
   out.context = windowClass(ctx);
+  out.thinking = thinking;
   return out;
 }
 
@@ -46,11 +49,26 @@ export const INSTRUCTIONS = {
   tie_break: "If several options can fully do it, pick the one that costs less: included in the subscription costs less than pay per use.",
 };
 
+export const EFFORT_INSTRUCTIONS = {
+  question: "How much thinking should the chosen model do for this request?",
+  goal: "Pick the lowest tier that still lets the model complete the request correctly in one pass; normal is the provider default.",
+  ignore: "how long the guest wants the answer to be",
+  tie_break: "when unsure between two adjacent tiers, choose the lower one; frontier is rare",
+};
+
+export const EFFORT_CRITERIA = {
+  trivial: "no real reasoning: greetings, small talk, a single lookup, or a direct rewrite",
+  normal: "everyday thinking: ordinary writing and reasoning, standard coding, explanations, summaries; leave the model at its default",
+  hard: "hard thinking: difficult multi-step code, maths, proofs, long agentic work, high-stakes or ambiguous requests",
+  frontier: "the hardest work where the model should use its top thinking level; not for ordinary hard tasks",
+};
+
 export function buildPayload({ pool, ask, req, shown, facts, policy }) {
   const ids = shown.map((_, n) => `c${n + 1}`);
   const criteria = Object.fromEntries(shown.map((id, n) => [ids[n], describeCandidate(id, facts[id], policy.models?.[id])]));
   return {
     ids,
+    effortChoices: [...ABSTRACT_LEVELS],
     state: {
       request: ask,
       pool: pool === "paid" ? "premium (paid) guest" : "free guest",
@@ -58,7 +76,10 @@ export function buildPayload({ pool, ask, req, shown, facts, policy }) {
       has_image: req.images > 0 ? "yes" : "no",
       size: sizeWords(req.tokens),
     },
-    questions: { model: { type: "choice", instructions: INSTRUCTIONS, criteria } },
+    questions: {
+      model: { type: "choice", instructions: INSTRUCTIONS, criteria },
+      effort: { type: "choice", instructions: EFFORT_INSTRUCTIONS, criteria: EFFORT_CRITERIA },
+    },
   };
 }
 
@@ -97,11 +118,19 @@ export function createJev({ fetchImpl = fetch, readFile = (f) => fs.readFileSync
         if (key) headers.authorization = "Bearer " + key;
         const r = await fetchImpl(src.url, { method: "POST", headers, body: JSON.stringify({ model: src.model, state: payload.state, questions: payload.questions }), signal: AbortSignal.timeout(Math.min(cfg.source_timeout_ms ?? 1200, left)) });
         if (!r.ok) throw new Error("HTTP " + r.status);
-        const a = (await r.json())?.answers?.model;
+        const answers = (await r.json())?.answers;
+        const a = answers?.model, e = answers?.effort;
         const ids = payload.ids;
-        if (!a || !ids.includes(a.choice) || typeof a.probabilities !== "object") throw new Error("malformed answer");
+        if (!a || !ids.includes(a.choice) || typeof a.probabilities !== "object") throw new Error("malformed model answer");
+        if (!e || !ABSTRACT_LEVELS.includes(e.choice)) throw new Error("malformed effort answer");
         health.delete(src.name);
-        return { ok: true, source: src.name, latency_ms: now() - ts, choice: a.choice, index: ids.indexOf(a.choice), probabilities: a.probabilities, confidence: confidence(a.probabilities), tried };
+        return {
+          ok: true, source: src.name, latency_ms: now() - ts,
+          choice: a.choice, index: ids.indexOf(a.choice), probabilities: a.probabilities, confidence: confidence(a.probabilities),
+          effort: e.choice,
+          ...(e.probabilities && typeof e.probabilities === "object" ? { effort_probabilities: e.probabilities, effort_confidence: confidence(e.probabilities) } : {}),
+          tried,
+        };
       } catch (e) {
         cool(src.name); tried.push({ source: src.name, error: String(e?.message ?? e), latency_ms: now() - ts });
       }
