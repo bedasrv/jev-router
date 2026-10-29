@@ -19,9 +19,9 @@ function policy(jev) {
     jev,
   };
 }
-function mk(jev, jevClient) {
+function mk(jev, jevClient, edit) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jevj-")); const file = path.join(dir, "policy.json");
-  const p = policy(jev); p.log_file = "log.jsonl"; fs.writeFileSync(file, JSON.stringify(p));
+  const p = policy(jev); edit?.(p); p.log_file = "log.jsonl"; fs.writeFileSync(file, JSON.stringify(p));
   const r = createRouter({ policyFile: file, jev: jevClient, facts: { get: (pol) => Object.fromEntries([...pol.order.paid, ...pol.order.free].map((i) => [i, pol.models[i]])) } });
   return { r, logs: () => fs.readFileSync(path.join(dir, "log.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) };
 }
@@ -51,12 +51,12 @@ test("on: a confident pick leads the list; low confidence and failures keep the 
   assert.equal(out.models[0], "a/p1");
   assert.equal(out.reason, "static");
   assert.equal(out.confidence, undefined);
-  assert.equal(out.thinking, undefined); // fail-open normal = provider default
+  assert.deepEqual(out.thinking, { control: "none" }); // fail-open normal clears any client effort
   ({ r } = mk(cfg({ mode: "on" }), stub({ ok: false, error: "x", tried: [] })));
   out = await r.onRoute(turn());
   assert.equal(out.models[0], "a/p1");
   assert.equal(out.reason, "static");
-  assert.equal(out.thinking, undefined);
+  assert.deepEqual(out.thinking, { control: "none" });
 });
 test("reason is static:cont on a continuation turn", async () => {
   const { r } = mk(cfg({ mode: "on" }), stub(hit));
@@ -64,7 +64,7 @@ test("reason is static:cont on a continuation turn", async () => {
   const out = await r.onRoute({ model: "paid", headers: {}, body: { messages: msgs } });
   assert.equal(out.reason, "static:cont");
   assert.equal(out.confidence, undefined);
-  assert.equal(out.thinking, undefined); // default normal = omit
+  assert.deepEqual(out.thinking, { control: "none" }); // default normal clears any client effort
 });
 test("continuation reuses the fresh task's effort without a second Jev call", async () => {
   let calls = 0;
@@ -78,10 +78,21 @@ test("continuation reuses the fresh task's effort without a second Jev call", as
   assert.deepEqual(again.thinking, { control: "effort", native: "high" });
   assert.equal(again.reason, "static:cont");
 });
-test("free requests never carry a thinking field", async () => {
+test("free requests never apply Jev effort (one candidate)", async () => {
   const { r } = mk(cfg({ mode: "on" }), stub({ ...hit, effort: "frontier" }));
   const out = await r.onRoute({ model: "free", headers: {}, body: { messages: [{ role: "user", content: "hi" }] } });
-  assert.equal(out.thinking, undefined);
+  assert.deepEqual(out.thinking, { control: "none" });
+});
+test("free with two candidates still never applies Jev effort (hard answer)", async () => {
+  const { r, logs } = mk(cfg({ mode: "on" }), stub({ ...hit, effort: "hard" }), (p) => {
+    p.order.free = ["f/x", "f/y"]; p.models["f/y"] = { ...p.models["f/x"] };
+  });
+  const out = await r.onRoute({ model: "free", headers: {}, body: { messages: [{ role: "user", content: "hi" }] } });
+  assert.deepEqual(out.thinking, { control: "none" });
+  const d = logs().find((l) => l.event === "decision");
+  assert.equal(d.jev.effort, "hard");
+  assert.equal(d.effort.reason, "free_pool");
+  assert.equal(d.effort.applied, null);
 });
 test("off / continuation / single candidate never call Jev", async () => {
   let calls = 0; const spy = { ask: async () => { calls++; return hit; } };

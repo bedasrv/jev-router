@@ -1,6 +1,6 @@
 {
  "name": "jev-router",
- "version": "0.6.0",
+ "version": "0.6.1",
  "description": "Pre-resolution model routing for the free/paid pools (static order + Jev model/effort pick, per-model thinking map)",
  "main": "index.mjs",
  "enabledByDefault": true,

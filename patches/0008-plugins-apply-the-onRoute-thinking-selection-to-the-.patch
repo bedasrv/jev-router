@@ -1,4 +1,4 @@
-From 5b0da6645b32ad7539a3e5d0adbeda5dfaa5ec1c Mon Sep 17 00:00:00 2001
+From 0b14ca4919de84c002e5187c5671f41800521f0b Mon Sep 17 00:00:00 2001
 From: jev-router-ci <jev-router-ci@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 13:00:20 +0700
 Subject: [PATCH] plugins: apply the onRoute thinking selection to the request
@@ -6,14 +6,14 @@ Subject: [PATCH] plugins: apply the onRoute thinking selection to the request
 
 A plugin may return {thinking:{control,native}} from onRoute: effort writes reasoning_effort, budget writes thinking.budget_tokens, toggle writes thinking.enabled/disabled. The native value is the model's own vocabulary (the plugin maps/clamps it), conflicting effort fields are removed, and the body is copied so combo targets never share mutation. Values are allowlisted; malformed selections are ignored.
 ---
- src/lib/plugins/hooks.ts               | 13 +++++++
+ src/lib/plugins/hooks.ts               | 13 ++++++
  src/sse/handlers/chat.ts               |  6 +++
- src/sse/handlers/chat/pluginOnRoute.ts | 52 ++++++++++++++++++++++++++
- tests/unit/plugins-onroute.test.ts     | 34 ++++++++++++++++-
- 4 files changed, 104 insertions(+), 1 deletion(-)
+ src/sse/handlers/chat/pluginOnRoute.ts | 58 ++++++++++++++++++++++++++
+ tests/unit/plugins-onroute.test.ts     | 49 +++++++++++++++++++++-
+ 4 files changed, 125 insertions(+), 1 deletion(-)
 
 diff --git a/src/lib/plugins/hooks.ts b/src/lib/plugins/hooks.ts
-index aa578f3e..73c16c63 100644
+index aa578f3e..07b5b7e9 100644
 --- a/src/lib/plugins/hooks.ts
 +++ b/src/lib/plugins/hooks.ts
 @@ -255,6 +255,17 @@ export interface PluginRouteContext {
@@ -26,9 +26,9 @@ index aa578f3e..73c16c63 100644
 + * the corresponding request field.
 + */
 +export interface PluginThinkingSelection {
-+  control: "effort" | "toggle";
-+  /** effort: a level such as none/low/medium/high; toggle: off/on. */
-+  value: string;
++  control: "effort" | "toggle" | "none";
++  /** effort: a level such as none/low/medium/high; toggle: off/on; none: omitted/empty. */
++  value?: string;
 +}
 +
  export interface PluginRouteResult {
@@ -75,14 +75,14 @@ index 20bd05b4..f5f60b67 100644
    // "auto" prefix fuzzy matching: "auto/fast" → "auto/best-fast", etc.
    // parseModel splits "auto/fast" into provider="auto" which isn't a real provider.
 diff --git a/src/sse/handlers/chat/pluginOnRoute.ts b/src/sse/handlers/chat/pluginOnRoute.ts
-index 84c9c8ea..5d8c7581 100644
+index 84c9c8ea..e1467bb6 100644
 --- a/src/sse/handlers/chat/pluginOnRoute.ts
 +++ b/src/sse/handlers/chat/pluginOnRoute.ts
 @@ -22,9 +22,12 @@ type LoggerLike =
    | null
    | undefined;
  
-+type PluginThinking = { control: "effort" | "toggle"; value: string };
++type PluginThinking = { control: "effort" | "toggle" | "none"; value?: string };
 +
  type PluginRouteMetadata = {
    reason?: string;
@@ -91,7 +91,7 @@ index 84c9c8ea..5d8c7581 100644
  };
  
  /** The plugin's answer after API-key filtering. `reason`/`confidence` are routing provenance. */
-@@ -39,10 +42,23 @@ export interface PluginRouteSelection extends PluginRouteMetadata {
+@@ -39,10 +42,24 @@ export interface PluginRouteSelection extends PluginRouteMetadata {
  type PluginRouteComboLike = PluginRouteMetadata & {
    traceInvocationId?: string;
    models: Array<{ model: string }>;
@@ -105,6 +105,7 @@ index 84c9c8ea..5d8c7581 100644
 +  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 +  const record = value as Record<string, unknown>;
 +  const control = record.control;
++  if (control === "none") return { control };
 +  if (control !== "effort" && control !== "toggle") return null;
 +  const text = typeof record.value === "string" ? record.value.trim() : "";
 +  if (!text || text.length > 32 || /[\r\n]/.test(text)) return null;
@@ -115,7 +116,7 @@ index 84c9c8ea..5d8c7581 100644
  export async function runPluginOnRouteHook(args: {
    requestId: string;
    body: unknown;
-@@ -81,10 +97,12 @@ export async function runPluginOnRouteHook(args: {
+@@ -81,10 +98,12 @@ export async function runPluginOnRouteHook(args: {
        "PLUGIN",
        `onRoute: ${args.model} → [${models.join(", ")}]${result.reason ? ` (${result.reason})` : ""}`
      );
@@ -128,7 +129,7 @@ index 84c9c8ea..5d8c7581 100644
      };
    } catch (err) {
      args.log?.debug?.(
-@@ -120,6 +138,7 @@ export function buildPluginRouteCombo(
+@@ -120,6 +139,7 @@ export function buildPluginRouteCombo(
      // Route provenance for the response head; never persisted with the combo.
      routeReason: typeof metadata.reason === "string" ? metadata.reason : undefined,
      routeConfidence: typeof metadata.confidence === "number" ? metadata.confidence : undefined,
@@ -136,7 +137,7 @@ index 84c9c8ea..5d8c7581 100644
      isHidden: true,
      isActive: true,
      sortOrder: 0,
-@@ -127,6 +146,39 @@ export function buildPluginRouteCombo(
+@@ -127,6 +147,44 @@ export function buildPluginRouteCombo(
    };
  }
  
@@ -163,6 +164,11 @@ index 84c9c8ea..5d8c7581 100644
 +    else next.output_config = output;
 +  }
 +
++  if (t.control === "none") {
++    delete next.reasoning_effort;
++    delete next.thinking;
++    return next as T;
++  }
 +  if (t.control === "effort") {
 +    next.reasoning_effort = String(t.value);
 +    delete next.thinking;
@@ -177,7 +183,7 @@ index 84c9c8ea..5d8c7581 100644
  function normalizeRouteReason(value: unknown): string | null {
    if (typeof value !== "string") return null;
 diff --git a/tests/unit/plugins-onroute.test.ts b/tests/unit/plugins-onroute.test.ts
-index 255e897d..b12f8d52 100644
+index 255e897d..0f9291eb 100644
 --- a/tests/unit/plugins-onroute.test.ts
 +++ b/tests/unit/plugins-onroute.test.ts
 @@ -17,6 +17,7 @@ import {
@@ -205,7 +211,7 @@ index 255e897d..b12f8d52 100644
  });
  
  test("buildPluginRouteCombo has stored priority-combo shape, named after the request", () => {
-@@ -86,6 +88,36 @@ test("buildPluginRouteCombo carries a trace invocation id", () => {
+@@ -86,6 +88,51 @@ test("buildPluginRouteCombo carries a trace invocation id", () => {
    assert.notEqual(a.traceInvocationId, b.traceInvocationId);
  });
  
@@ -224,6 +230,21 @@ index 255e897d..b12f8d52 100644
 +  assert.deepEqual(off, { model: "x", max_tokens: 100, thinking: { type: "disabled" } });
 +  const on = applyPluginRouteThinking<Record<string, any>>({ model: "x" }, { control: "toggle", value: "on" });
 +  assert.deepEqual(on.thinking, { type: "enabled" });
++});
++
++test("applyPluginRouteThinking none clears a client-sent effort and never touches max_tokens", () => {
++  const body: Record<string, any> = {
++    model: "x", max_tokens: 123,
++    reasoning_effort: "high", reasoning: { effort: "high", summary: "auto" },
++    output_config: { effort: "high", format: "json" }, thinking: { type: "enabled" },
++  };
++  const out = applyPluginRouteThinking(body, { control: "none" });
++  assert.equal(out.reasoning_effort, undefined);
++  assert.deepEqual(out.reasoning, { summary: "auto" });
++  assert.deepEqual(out.output_config, { format: "json" });
++  assert.equal(out.thinking, undefined);
++  assert.equal(out.max_tokens, 123);
++  assert.equal(body.reasoning_effort, "high"); // copy only
 +});
 +
 +test("applyPluginRouteThinking ignores malformed or budget-only controls", () => {

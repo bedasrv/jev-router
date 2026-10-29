@@ -73,8 +73,8 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       if (out?.res.ok && out.res.confidence >= out.thr) {
         ({ models, excluded, nofit, cooling } = buildList({ pool, policy, facts: f, req, preferred: out.pick, health }));
         jevInfo = { applied: out.pick, confidence: Number(out.res.confidence.toFixed(3)), effort: out.res.effort };
-        desiredEffort = out.res.effort;
-        effortSource = "jev";
+        // Effort is a paid-pool decision. Free still logs Jev's answer but never applies it.
+        if (pool === "paid") { desiredEffort = out.res.effort; effortSource = "jev"; }
       }
     }
 
@@ -117,7 +117,8 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       models,
       reason: jevInfo ? "jev" : fresh ? "static" : "static:cont",
       ...(jevInfo ? { confidence: jevInfo.confidence } : {}),
-      ...(effortInfo?.applied ? { thinking: effortInfo.applied } : {}),
+      // Applied native control, or an explicit none/clear when normal/free/no mapping wins.
+      ...(effortInfo ? { thinking: effortInfo.applied ?? { control: "none" } } : {}),
     };
   }
 

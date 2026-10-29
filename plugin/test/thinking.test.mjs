@@ -157,7 +157,7 @@ test("router normal path omits the field; frontier takes the draft max when it s
   };
   let { r, logs } = mk(p, answer("c1", "normal"));
   let out = await r.onRoute(user());
-  assert.equal(out.thinking, undefined);
+  assert.deepEqual(out.thinking, { control: "none" });
   assert.deepEqual(out.models, ["a/head", "b/low"]);
   let e = logs().find((l) => l.event === "decision").effort;
   assert.equal(e.omitted, true); assert.equal(e.reason, "default");
@@ -176,10 +176,10 @@ test("fail-open applies normal (omit/default) for paid; free never gets effort",
   };
   const { r, logs } = mk(p, { ask: async () => ({ ok: false, error: "down", tried: [] }) });
   const paid = await r.onRoute(user());
-  assert.equal(paid.thinking, undefined);
+  assert.deepEqual(paid.thinking, { control: "none" });
   const e = logs().find((l) => l.event === "decision").effort;
   assert.equal(e.source, "default"); assert.equal(e.need, "normal"); assert.equal(e.omitted, true);
   const free = await r.onRoute({ model: "free", headers: {}, body: { messages: [{ role: "user", content: "hi" }] } });
-  assert.equal(free.thinking, undefined);
+  assert.deepEqual(free.thinking, { control: "none" });
   assert.equal(logs().filter((l) => l.event === "decision").at(-1).effort.reason, "free_pool");
 });
