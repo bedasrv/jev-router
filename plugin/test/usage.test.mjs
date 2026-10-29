@@ -7,17 +7,20 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRouter } from "../index.mjs";
 import { createJev } from "../lib/jev.mjs";
-import { normalizeUsage, dailyUsage, outcomeOf } from "../lib/usage.mjs";
+import { normalizeUsage, dailyUsage, outcomeOf, isUnpriced } from "../lib/usage.mjs";
 
 const REPORT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "report.mjs");
 const usage = { prompt_tokens: 900, completion_tokens: 12, total_tokens: 912, prompt_tokens_details: { cached_tokens: 640 }, cost: 0.00042, list_cost: 0.0011, note: "text is dropped" };
+// The shape a live OpenRouter typesafe/jev-1.13 call returned (rev-1, 2026-10-29).
+const LIVE = { model: "typesafe/jev-1.13-20260917", answers: { model: { choice: "c2", probabilities: { c1: 0.1, c2: 0.9 } }, effort: { choice: "normal" } }, usage: { input_tokens: 761, output_tokens: 80, cost: 0.000031962 }, id: "gen-1", provider: "TypeSafe" };
 const reply = (body) => ({ ok: true, status: 200, json: async () => body });
 const good = (extra = {}) => reply({ model: "typesafe/jev-1.14", answers: { model: { choice: "c2", probabilities: { c1: 0.1, c2: 0.9 } }, effort: { choice: "hard" } }, usage, ...extra });
 const src = (name) => ({ name, url: `http://x/${name}`, model: "~typesafe/jev-latest" });
 const payload = { ids: ["c1", "c2"], state: {}, questions: {} };
 
-test("normalizeUsage keeps numbers only and maps both naming styles to one shape", () => {
-  assert.deepEqual(normalizeUsage(usage), { prompt_tokens: 900, completion_tokens: 12, cached_tokens: 640, total_tokens: 912, cost: 0.00042, list_cost: 0.0011 });
+test("normalizeUsage keeps numbers only, maps both naming styles, and turns money into integer nano-USD", () => {
+  assert.deepEqual(normalizeUsage(LIVE.usage), { prompt_tokens: 761, completion_tokens: 80, cost_nusd: 31962 });
+  assert.deepEqual(normalizeUsage(usage), { prompt_tokens: 900, completion_tokens: 12, cached_tokens: 640, total_tokens: 912, cost_nusd: 420000, list_cost_nusd: 1100000 });
   assert.deepEqual(normalizeUsage({ input_tokens: 5, output_tokens: 2, cache_read_input_tokens: 3 }), { prompt_tokens: 5, completion_tokens: 2, cached_tokens: 3 });
   assert.equal(normalizeUsage({ cost: "0.1", note: "x" }), undefined);
   assert.equal(normalizeUsage(null), undefined);
@@ -32,7 +35,10 @@ test("client returns Jev's usage and served model id; a malformed answer still r
   assert.equal(res.model, "typesafe/jev-1.14");
   assert.deepEqual(res.usage, normalizeUsage(usage));
   assert.equal(res.tried[0].error, "malformed model answer");
-  assert.deepEqual(res.tried[0].usage, { prompt_tokens: 50, cost: 0.0001 });
+  assert.deepEqual(res.tried[0].usage, { prompt_tokens: 50, cost_nusd: 100000 });
+  const live = await createJev({ fetchImpl: async () => reply(LIVE) }).ask({ sources: [src("a")] }, payload);
+  assert.equal(live.model, "typesafe/jev-1.13-20260917");
+  assert.deepEqual(live.usage, { prompt_tokens: 761, completion_tokens: 80, cost_nusd: 31962 });
   // no usage in the response: the requested model id stands, no usage field
   const bare = await createJev({ fetchImpl: async () => good({ usage: undefined, model: undefined }) }).ask({ sources: [src("a")] }, payload);
   assert.equal(bare.model, "~typesafe/jev-latest");
@@ -41,6 +47,12 @@ test("client returns Jev's usage and served model id; a malformed answer still r
   assert.equal(down.ok, false);
   assert.equal(typeof down.latency_ms, "number");
   assert.equal(down.tried[0].usage, undefined);
+  assert.equal(down.tried[0].timeout, undefined); // an HTTP error is not a timeout
+  // aborted by source_timeout_ms after sending: flagged, so the report can say cost is a lower bound
+  const slow = createJev({ fetchImpl: (url, { signal }) => new Promise((_, rej) => signal.addEventListener("abort", () => rej(signal.reason))) });
+  const cut = await slow.ask({ deadline_ms: 3000, source_timeout_ms: 30, sources: [src("a")] }, payload);
+  assert.equal(cut.tried[0].timeout, true);
+  assert.equal(isUnpriced(cut.tried[0]), true);
 });
 
 function mk(mode, jevClient) {
@@ -57,7 +69,7 @@ function mk(mode, jevClient) {
 const SECRET = "tolong rahasiakan kalimat unik ini";
 const turn = { model: "paid", requestId: "r1", headers: {}, body: { messages: [{ role: "user", content: SECRET }] } };
 const settle = () => new Promise((res) => setTimeout(res, 20));
-const hit = (confidence, extra = {}) => ({ ok: true, source: "a", model: "typesafe/jev-1.14", latency_ms: 7, usage: { prompt_tokens: 900, completion_tokens: 12, cost: 0.0004 }, index: 1, choice: "c2", probabilities: { c1: 0.1, c2: 0.9 }, confidence, effort: "hard", tried: [], ...extra });
+const hit = (confidence, extra = {}) => ({ ok: true, source: "a", model: "typesafe/jev-1.14", latency_ms: 7, usage: { prompt_tokens: 900, completion_tokens: 12, cost_nusd: 400000 }, index: 1, choice: "c2", probabilities: { c1: 0.1, c2: 0.9 }, confidence, effort: "hard", tried: [], ...extra });
 
 test("the jev log entry carries usage, latency, model id and outcome, never the prompt text", async () => {
   for (const [mode, res, outcome] of [
@@ -73,35 +85,42 @@ test("the jev log entry carries usage, latency, model id and outcome, never the 
     assert.equal(typeof j.latency_ms, "number");
     if (res.ok) {
       assert.equal(j.jev_model, "typesafe/jev-1.14");
-      assert.deepEqual(j.usage, { prompt_tokens: 900, completion_tokens: 12, cost: 0.0004 });
+      assert.deepEqual(j.usage, { prompt_tokens: 900, completion_tokens: 12, cost_nusd: 400000 });
     }
     assert.equal(raw().includes(SECRET), false);
   }
 });
 
-test("dailyUsage sums calls, outcomes, tokens and cost per UTC day, counting billed failed attempts", () => {
+test("dailyUsage sums integer nano-USD, outcomes and tokens per UTC day, and counts unpriced timeouts", () => {
   const rows = [
-    { t: "2026-10-28T23:59:00.000Z", event: "jev", ok: true, outcome: "applied", jev_model: "m1", usage: { prompt_tokens: 100, completion_tokens: 5, cached_tokens: 60, cost: 0.001, list_cost: 0.002 } },
-    { t: "2026-10-28T10:00:00.000Z", event: "jev", ok: true, outcome: "unconfident", jev_model: "m1", usage: { prompt_tokens: 50, completion_tokens: 3 }, tried: [{ source: "a", error: "malformed model answer", usage: { prompt_tokens: 40, cost: 0.0005 } }] },
-    { t: "2026-10-29T01:00:00.000Z", event: "jev", ok: false, outcome: "unavailable", tried: [{ source: "a", error: "HTTP 503" }] },
+    { t: "2026-10-28T23:59:00.000Z", event: "jev", ok: true, outcome: "applied", jev_model: "m1", usage: { prompt_tokens: 100, completion_tokens: 5, cached_tokens: 60, cost_nusd: 1000000, list_cost_nusd: 2000000 } },
+    { t: "2026-10-28T10:00:00.000Z", event: "jev", ok: true, outcome: "unconfident", jev_model: "m1", usage: { prompt_tokens: 50, completion_tokens: 3 }, tried: [{ source: "a", error: "malformed model answer", usage: { prompt_tokens: 40, cost_nusd: 500000 } }] },
+    { t: "2026-10-29T01:00:00.000Z", event: "jev", ok: false, outcome: "unavailable", tried: [{ source: "a", error: "HTTP 503" }, { source: "b", error: "The operation was aborted due to timeout", timeout: true }, { source: "c", error: "cooling" }] },
+    { t: "2026-10-29T01:30:00.000Z", event: "jev", ok: true, outcome: "applied", usage: { cost_nusd: 31962 }, tried: [{ source: "a", error: "The operation was aborted due to timeout" }] }, // pre-flag row
     { t: "2026-10-29T02:00:00.000Z", event: "jev", ok: true, mode: "shadow" }, // pre-usage row
     { t: "2026-10-29T02:00:00.000Z", event: "decision" },
   ];
   const d = dailyUsage(rows);
   assert.deepEqual(Object.keys(d), ["2026-10-28", "2026-10-29"]);
-  assert.deepEqual(d["2026-10-28"], { calls: 2, answered: 2, outcomes: { applied: 1, unconfident: 1 }, prompt_tokens: 190, completion_tokens: 8, cached_tokens: 60, cost: 0.0015, list_cost: 0.002, priced: 2, models: { m1: 2 } });
-  assert.deepEqual(d["2026-10-29"].outcomes, { unavailable: 1, answered: 1 });
-  assert.equal(d["2026-10-29"].priced, 0);
+  assert.deepEqual(d["2026-10-28"], { calls: 2, answered: 2, outcomes: { applied: 1, unconfident: 1 }, prompt_tokens: 190, completion_tokens: 8, cached_tokens: 60, cost_nusd: 1500000, list_cost_nusd: 2000000, priced: 2, list_priced: 1, unpriced_attempts: 0, models: { m1: 2 } });
+  assert.deepEqual(d["2026-10-29"].outcomes, { unavailable: 1, applied: 1, answered: 1 });
+  assert.equal(d["2026-10-29"].priced, 1);
+  assert.equal(d["2026-10-29"].list_priced, 0);
+  assert.equal(d["2026-10-29"].unpriced_attempts, 2);
+  // 10,000 live-size calls sum exactly (floats gave 4.200000000000621 for 10,000 x 0.00042)
+  const many = dailyUsage(Array.from({ length: 10000 }, () => ({ t: "2026-10-30T00:00:00Z", event: "jev", ok: true, usage: normalizeUsage({ cost: 0.00042 }) })));
+  assert.equal(many["2026-10-30"].cost_nusd, 4200000000);
   assert.equal(outcomeOf({ ok: false }), "unavailable");
 });
 
 test("report prints the per-day Jev usage", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jevr-")); const file = path.join(dir, "d.jsonl");
   fs.writeFileSync(file, [
-    { t: "2026-10-29T01:00:00.000Z", event: "jev", ok: true, outcome: "applied", source: "a", latency_ms: 9, confidence: 0.8, pool: "paid", pick: "a/p1", jev_model: "m1", usage: { prompt_tokens: 100, completion_tokens: 5, cached_tokens: 60, cost: 0.001, list_cost: 0.002 } },
+    { t: "2026-10-29T01:00:00.000Z", event: "jev", ok: true, outcome: "applied", source: "a", latency_ms: 9, confidence: 0.8, pool: "paid", pick: "a/p1", jev_model: "m1", usage: { prompt_tokens: 100, completion_tokens: 5, cached_tokens: 60, cost_nusd: 31962 } },
+    { t: "2026-10-29T01:30:00.000Z", event: "jev", ok: false, outcome: "unavailable", tried: [{ source: "a", error: "timeout", timeout: true }] },
     { t: "2026-10-29T02:00:00.000Z", event: "decision" },
   ].map((r) => JSON.stringify(r)).join("\n") + "\n");
   const out = execFileSync(process.execPath, [REPORT, file], { encoding: "utf8" });
   assert.match(out, /jev usage per day \(UTC\):/);
-  assert.match(out, /2026-10-29: 1 calls \(applied=1\), tokens in 100 \(cached 60\) out 5, cost \$0\.00100 list \$0\.00200, models m1/);
+  assert.match(out, /2026-10-29: 2 calls \(applied=1 unavailable=1\), tokens in 100 \(cached 60\) out 5, cost \$0\.000031962 list n\/a \(lower bound: 1 timed-out attempts without usage\), models m1/);
 });

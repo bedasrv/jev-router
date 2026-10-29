@@ -25,10 +25,12 @@ console.log(`\nkill criterion: ${enough ? "enough data" : `need ${200 - ok.lengt
 const days = Object.entries(dailyUsage(rows));
 if (days.length) {
   console.log("\njev usage per day (UTC):");
-  const $ = (v) => "$" + v.toFixed(5);
+  // integer nano-USD -> "$0.000031962"; integer arithmetic, no float rounding
+  const $ = (n) => "$" + Math.trunc(n / 1e9) + "." + String(n % 1e9).padStart(9, "0");
   for (const [day, d] of days) {
     const oc = Object.entries(d.outcomes).map(([k, v]) => `${k}=${v}`).join(" ");
-    const priced = d.priced ? `cost ${$(d.cost)} list ${$(d.list_cost)}` : "cost n/a";
-    console.log(`  ${day}: ${d.calls} calls (${oc}), tokens in ${d.prompt_tokens} (cached ${d.cached_tokens}) out ${d.completion_tokens}, ${priced}, models ${Object.keys(d.models).join(",") || "n/a"}`);
+    const priced = `cost ${d.priced ? $(d.cost_nusd) : "n/a"} list ${d.list_priced ? $(d.list_cost_nusd) : "n/a"}`;
+    const lower = d.unpriced_attempts ? ` (lower bound: ${d.unpriced_attempts} timed-out attempts without usage)` : "";
+    console.log(`  ${day}: ${d.calls} calls (${oc}), tokens in ${d.prompt_tokens} (cached ${d.cached_tokens}) out ${d.completion_tokens}, ${priced}${lower}, models ${Object.keys(d.models).join(",") || "n/a"}`);
   }
 }

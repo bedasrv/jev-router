@@ -138,7 +138,9 @@ export function createJev({ fetchImpl = fetch, readFile = (f) => fs.readFileSync
           tried,
         };
       } catch (e) {
-        cool(src.name); tried.push({ source: src.name, error: String(e?.message ?? e), latency_ms: now() - ts, ...(usage ? { model, usage } : {}) });
+        cool(src.name); // timeout: aborted by source_timeout_ms after the request was sent, so possibly billed with no usage
+        const timeout = e?.name === "TimeoutError" || e?.name === "AbortError";
+        tried.push({ source: src.name, error: String(e?.message ?? e), latency_ms: now() - ts, ...(timeout ? { timeout } : {}), ...(usage ? { model, usage } : {}) });
       }
     }
     return { ok: false, error: "no source answered", latency_ms: now() - t0, tried };
