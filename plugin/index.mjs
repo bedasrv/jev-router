@@ -5,7 +5,7 @@ import { createFacts } from "./lib/facts.mjs";
 import { inspectRequest } from "./lib/eligibility.mjs";
 import { buildList, eligibleIds } from "./lib/builder.mjs";
 import { createJev, buildPayload, askText } from "./lib/jev.mjs";
-import { applyThinkingToList } from "./lib/thinking.mjs";
+import { applyThinkingToList, toHostThinking } from "./lib/thinking.mjs";
 import { createHealth } from "./lib/health.mjs";
 import { conversationKey, isFresh, createSessions, hash } from "./lib/sessions.mjs";
 import { createLog } from "./lib/decision-log.mjs";
@@ -119,8 +119,9 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       models,
       reason: jevInfo ? "jev" : fresh ? "static" : "static:cont",
       ...(jevInfo ? { confidence: jevInfo.confidence } : {}),
-      // Applied native control, or an explicit none/clear when normal/free/no mapping wins.
-      ...(effortInfo ? { thinking: effortInfo.applied ?? { control: "none" } } : {}),
+      // Applied native control as {control, value} (the 0008 wire shape; the log keeps `native`),
+      // or an explicit none/clear when normal/free/no mapping wins.
+      ...(effortInfo ? { thinking: toHostThinking(effortInfo.applied) } : {}),
     };
   }
 

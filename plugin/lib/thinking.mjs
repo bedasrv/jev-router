@@ -149,6 +149,15 @@ export function applyThinkingToList({ models, abstract, policy }) {
   };
 }
 
+/**
+ * The onRoute `thinking` field in OmniRoute's shape (patch 0008 normalizePluginThinking):
+ * {control:"effort"|"toggle", value} or {control:"none"}. The host drops any other shape
+ * silently, so the plan's `native` must travel as `value`. No plan = clear the client's effort.
+ */
+export function toHostThinking(applied) {
+  return applied ? { control: applied.control, value: String(applied.native) } : { control: "none" };
+}
+
 /** A no-number phrase for Jev's candidate descriptions, so hard turns can prefer a model that can think more. */
 export function thinkingPhrase(t) {
   const n = normalizeThinking(t);

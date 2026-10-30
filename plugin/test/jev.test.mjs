@@ -45,7 +45,7 @@ test("on: a confident pick leads the list; low confidence and failures keep the 
   assert.equal(out.models[0], "b/p2");
   assert.equal(out.reason, "jev");
   assert.equal(out.confidence, 0.85);
-  assert.deepEqual(out.thinking, { control: "effort", native: "high" });
+  assert.deepEqual(out.thinking, { control: "effort", value: "high" });
   ({ r } = mk(cfg({ mode: "on" }), stub({ ...hit, confidence: 0.2 })));
   out = await r.onRoute(turn());
   assert.equal(out.models[0], "a/p1");
@@ -72,10 +72,10 @@ test("continuation reuses the fresh task's effort without a second Jev call", as
   const h = { "x-omniroute-session-id": "s-effort" };
   const msgs = [{ role: "user", content: "go" }];
   const first = await r.onRoute({ model: "paid", headers: h, body: { messages: msgs } });
-  assert.deepEqual(first.thinking, { control: "effort", native: "high" });
+  assert.deepEqual(first.thinking, { control: "effort", value: "high" });
   const again = await r.onRoute({ model: "paid", headers: h, body: { messages: [...msgs, { role: "assistant", content: "", tool_calls: [{}] }, { role: "tool", content: "ok" }] } });
   assert.equal(calls, 1);
-  assert.deepEqual(again.thinking, { control: "effort", native: "high" });
+  assert.deepEqual(again.thinking, { control: "effort", value: "high" });
   assert.equal(again.reason, "static:cont");
 });
 test("free requests never apply Jev effort (one candidate)", async () => {

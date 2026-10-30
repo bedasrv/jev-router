@@ -137,7 +137,7 @@ test("router applies the chosen tier, filters fallbacks, and logs need/native/mo
   const { r, logs } = mk(p, answer("c1", "hard"));
   const out = await r.onRoute(user());
   assert.deepEqual(out.models, ["a/head", "b/high"]);
-  assert.deepEqual(out.thinking, { control: "effort", native: "high" });
+  assert.deepEqual(out.thinking, { control: "effort", value: "high" });
   const d = logs().find((l) => l.event === "decision");
   assert.deepEqual(d.effort, {
     source: "jev", need: "hard", abstract: "hard", model: "a/head",
@@ -164,7 +164,7 @@ test("router normal path omits the field; frontier takes the draft max when it s
 
   ({ r, logs } = mk(p, answer("c1", "frontier")));
   out = await r.onRoute(user());
-  assert.deepEqual(out.thinking, { control: "effort", native: "max" });
+  assert.deepEqual(out.thinking, { control: "effort", value: "max" });
   assert.deepEqual(out.models, ["a/head"]); // b/low cannot take max
 });
 
