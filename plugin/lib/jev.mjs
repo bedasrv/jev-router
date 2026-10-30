@@ -47,7 +47,9 @@ export const INSTRUCTIONS = {
     "how much harm a wrong or sloppy answer would do",
   ],
   ignore: "how long the guest wants the answer to be",
-  tie_break: "If several options can fully do it, pick the one that costs less: included in the subscription costs less than pay per use.",
+  // c1 is the head of the configured order (the default). Measured 2026-10-30 on 103 logged paid asks: the older
+  // cost tie-break left 21% of answers confident (every paid option is "included in the subscription"), this one 50%.
+  tie_break: "If several options can fully do it, pick c1, the default; choose another only when its listed strength is what this request needs.",
 };
 
 export const EFFORT_INSTRUCTIONS = {

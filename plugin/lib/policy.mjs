@@ -34,6 +34,10 @@ export function validate(p) {
     if (!a || typeof a !== "object" || Array.isArray(a) || !Object.values(a).every((v) => Array.isArray(v) && v.every((x) => typeof x === "string")))
       throw new Error("thinking_aliases must map a prefix to an array of prefixes");
   }
+  const ss = p.jev?.skip_sessions;
+  if (ss !== undefined && !(Array.isArray(ss) && ss.every((x) => typeof x === "string" && x))) throw new Error("jev.skip_sessions must be an array of session ids");
+  const sh = p.jev?.session_header;
+  if (sh !== undefined && !(typeof sh === "string" && sh)) throw new Error("jev.session_header must be a header name");
   const mf = p.jev?.min_fallbacks;
   if (mf !== undefined && !(Number.isInteger(mf) && mf >= 0)) throw new Error("jev.min_fallbacks must be a non-negative integer");
   // Missing thinking is allowed at runtime (unknown = control:none, omit the field); when an

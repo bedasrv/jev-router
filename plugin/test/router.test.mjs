@@ -101,6 +101,11 @@ test("an id present in both pools appears once", async () => {
 });
 test("helpers", () => {
   assert.throws(() => validate({ order: { paid: [1], free: [] } }));
+  const ok = { order: { paid: [], free: [] } };
+  assert.doesNotThrow(() => validate({ ...ok, jev: { skip_sessions: ["canary"], session_header: "x-opencode-session" } }));
+  assert.throws(() => validate({ ...ok, jev: { skip_sessions: "canary" } }), /skip_sessions/);
+  assert.throws(() => validate({ ...ok, jev: { skip_sessions: [""] } }), /skip_sessions/);
+  assert.throws(() => validate({ ...ok, jev: { session_header: 1 } }), /session_header/);
   assert.equal(eligible({ tools: true, context_length: 100000 }, inspectRequest({ messages: [{ role: "user", content: "x" }] })).ok, true);
   assert.deepEqual(alternate(["a/1", "a/2", "b/1"], {}), ["a/1", "b/1", "a/2"]);
 });

@@ -23,6 +23,16 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
   let health = createHealth({ now, log: (r) => log(r) });
   let healthCfg = "";
 
+  // Sessions named in jev.skip_sessions (the app's upstream canaries, session "canary") are never sent to Jev:
+  // every candidate can answer them, so Jev is unconfident by design and each call is only cost.
+  function jevSkipped(cfg, headers) {
+    const list = cfg?.skip_sessions;
+    if (!Array.isArray(list) || !list.length) return false;
+    const name = (cfg.session_header ?? "x-opencode-session").toLowerCase();
+    const v = Object.entries(headers ?? {}).find(([k]) => k.toLowerCase() === name)?.[1];
+    return [v].flat().some((x) => typeof x === "string" && list.includes(x));
+  }
+
   // Jev: shadow = ask in the background and only log; on = wait (<= deadline) and lead with a confident pick.
   function jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead }) {
     const cfg = policy.jev;
@@ -69,7 +79,8 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     let { models, excluded, nofit, cooling } = buildList({ pool, policy, facts: f, req, preferred, health });
     let jevInfo;
     let desiredEffort = null, effortSource = null;
-    const step = models.length ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0] }) : null;
+    const skipped = jevSkipped(policy.jev, ctx.headers);
+    const step = models.length && !skipped ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0] }) : null;
     if (step?.mode === "on") {
       const out = await step.promise;
       if (out?.res.ok && out.res.confidence >= out.thr) {
@@ -112,7 +123,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     sessions.set(key, { head: models[0], effort: desiredEffort ?? null }, now());
     log({
       event: "decision", id: ctx.requestId ?? null, pool, conv: hash(key), fresh, est_tokens: req.tokens, reserve: req.reserve,
-      tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode, effort: effortInfo, demoted: cooling?.length ? cooling : undefined,
+      tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode, jev_skipped: skipped || undefined, effort: effortInfo, demoted: cooling?.length ? cooling : undefined,
     });
     // Response-header provenance (patch 0007): reason is jev | static[:cont]; confidence
     // only when Jev's pick was applied. The pool itself is already the request model.

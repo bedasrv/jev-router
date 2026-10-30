@@ -32,8 +32,6 @@ export const outcomeOf = (r) => r.outcome ?? (r.ok ? "answered" : "unavailable")
 
 // Every call in one `jev` event that returned usage: the answer plus failed attempts (malformed answer).
 const usagesOf = (r) => [r.usage, ...(r.tried ?? []).map((t) => t?.usage)].filter(Boolean);
-// An attempt cut off by our timeout after the request went out: Jev may still bill it, but no usage came
-// back, so the day's cost is a lower bound. Older rows have no `timeout` flag, only the error text.
 // The Jev model ids that actually answered in one `jev` event: the answer's served id plus failed attempts that
 // named one. Rows from before `served_model` existed (no `requested_model`) only had `jev_model`, set from the
 // served id whenever Jev sent one; an attempt then kept its id only next to usage.
@@ -41,7 +39,8 @@ export const servedModelsOf = (r) => [
   r.ok ? (r.served_model ?? (r.requested_model === undefined ? r.jev_model : undefined)) : undefined,
   ...(r.tried ?? []).map((t) => t?.served_model ?? (t?.usage ? t.model : undefined)),
 ].filter((m) => typeof m === "string" && m);
-
+// An attempt cut off by our timeout after the request went out: Jev may still bill it, but no usage came
+// back, so the day's cost is a lower bound. Older rows have no `timeout` flag, only the error text.
 export const isUnpriced = (t) => !!t && !t.usage && (t.timeout === true || (t.timeout === undefined && /timeout|timed out|aborted/i.test(String(t.error ?? ""))));
 
 export function dailyUsage(rows) {

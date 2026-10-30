@@ -104,6 +104,33 @@ test("off / continuation / single candidate never call Jev", async () => {
   await r.onRoute({ model: "free", headers: {}, body: { messages: [{ role: "user", content: "hi" }] } }); // one eligible free candidate
   assert.equal(calls, 0);
 });
+test("jev.skip_sessions: the app's canary session is never sent to Jev; other sessions are", async () => {
+  let calls = 0; const spy = { ask: async () => { calls++; return hit; } };
+  const canary = (h) => ({ ...turn("Reply with the single word OK."), headers: h });
+  let { r, logs } = mk(cfg({ mode: "on", skip_sessions: ["canary"] }), spy);
+  const out = await r.onRoute(canary({ "x-opencode-session": "canary" }));
+  assert.equal(calls, 0);
+  assert.equal(out.models[0], "a/p1"); assert.equal(out.reason, "static");
+  assert.deepEqual(out.thinking, { control: "none" }); // the paid default (normal), as for an unconfident turn
+  const d = logs().find((l) => l.event === "decision");
+  assert.equal(d.jev_skipped, true); assert.equal(d.jev_mode, undefined);
+  await r.onRoute(canary({ "X-OpenCode-Session": "canary" })); // header names are case-insensitive
+  assert.equal(calls, 0);
+  await r.onRoute(canary({ "x-opencode-session": "guest-1" }));
+  assert.equal(calls, 1);
+  assert.equal(logs().filter((l) => l.event === "decision").at(-1).jev_skipped, undefined);
+  ({ r } = mk(cfg({ mode: "on", skip_sessions: ["canary"], session_header: "x-session" }), spy));
+  await r.onRoute(canary({ "x-session": "canary", "x-opencode-session": "guest-1" }));
+  assert.equal(calls, 1);
+  ({ r } = mk(cfg({ mode: "on" }), spy)); // no list: the canary is asked, as before
+  await r.onRoute(canary({ "x-opencode-session": "canary" }));
+  assert.equal(calls, 2);
+});
+test("tie-break: options that can all do it go to c1, the head of the configured order (not the cheaper one)", () => {
+  const pl = buildPayload({ pool: "paid", ask: "x", req: { tokens: 10, images: 0, usesTools: false }, shown: ["a/p1", "b/p2"], facts: {}, policy: { models: {} } });
+  assert.match(pl.questions.model.instructions.tie_break, /^If several options can fully do it, pick c1, the default; /);
+  assert.ok(!/cost/.test(pl.questions.model.instructions.tie_break));
+});
 test("client: failover to the next source, cooldown after three failures, malformed answers rejected", async () => {
   const calls = []; let t = 0;
   const fetchImpl = async (url) => { calls.push(url); if (url.endsWith("/a")) return { ok: false, status: 500 }; return answer("c1", { c1: 0.8, c2: 0.2 }); };

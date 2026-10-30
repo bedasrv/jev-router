@@ -537,6 +537,9 @@
   },
   "sample_file": "shadow-samples.jsonl",
   "sample_chars": 300,
+  "skip_sessions": [
+   "canary"
+  ],
   "sources": [
    {
     "name": "ocfree",
