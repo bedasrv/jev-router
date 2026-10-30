@@ -29,6 +29,13 @@ export function validate(p) {
   }
   if (p.models && typeof p.models !== "object") throw new Error("models must be an object");
   if (p.denylist && !Array.isArray(p.denylist)) throw new Error("denylist must be an array");
+  if (p.thinking_aliases !== undefined) {
+    const a = p.thinking_aliases;
+    if (!a || typeof a !== "object" || Array.isArray(a) || !Object.values(a).every((v) => Array.isArray(v) && v.every((x) => typeof x === "string")))
+      throw new Error("thinking_aliases must map a prefix to an array of prefixes");
+  }
+  const mf = p.jev?.min_fallbacks;
+  if (mf !== undefined && !(Number.isInteger(mf) && mf >= 0)) throw new Error("jev.min_fallbacks must be a non-negative integer");
   // Missing thinking is allowed at runtime (unknown = control:none, omit the field); when an
   // entry is present its shape is strict so a typo cannot silently change what goes on the wire.
   for (const [id, m] of Object.entries(p.models ?? {})) {

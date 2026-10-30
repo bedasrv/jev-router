@@ -122,8 +122,15 @@ export function planThinking(id, abstract, policy) {
  * Apply one abstract need to an ordered model list. The head model decides the native value;
  * fallbacks are kept only when the exact same control+value works for them, because the request
  * body carries one thinking shape for every attempt. Normal (and any unmapped need) omits the
- * field and keeps the full list; never fail the turn.
+ * field and keeps the full list; so does a need whose filtering would leave fewer fallbacks than
+ * the floor (reason "floor"). Never fail the turn.
  */
+export const DEFAULT_MIN_FALLBACKS = 2;
+export const minFallbacks = (policy) => {
+  const v = policy?.jev?.min_fallbacks;
+  return Number.isInteger(v) && v >= 0 ? v : DEFAULT_MIN_FALLBACKS;
+};
+
 export function applyThinkingToList({ models, abstract, policy }) {
   if (!models?.length) return { models: models ?? [], applied: null, omitted: true, reason: "empty", dropped: [] };
   const head = models[0];
@@ -137,6 +144,12 @@ export function applyThinkingToList({ models, abstract, policy }) {
     return !p.omitted && p.control === headPlan.control && p.native === headPlan.native;
   });
   const dropped = models.filter((id) => !kept.includes(id));
+  // Fallback floor: an effort that would leave fewer than policy.jev.min_fallbacks fallbacks (default 2; never more than
+  // the list had) is not worth a turn that one failed attempt can lose. Send no effort and keep the whole list.
+  const floor = Math.min(minFallbacks(policy), models.length - 1);
+  if (dropped.length && kept.length - 1 < floor) {
+    return { models, applied: null, omitted: true, reason: "floor", floor: true, abstract, head, headPlan, wouldKeep: kept.length, dropped: [] };
+  }
   return {
     models: kept,
     applied: { control: headPlan.control, native: headPlan.native },

@@ -5,7 +5,7 @@ import { createFacts } from "./lib/facts.mjs";
 import { inspectRequest } from "./lib/eligibility.mjs";
 import { buildList, eligibleIds } from "./lib/builder.mjs";
 import { createJev, buildPayload, askText } from "./lib/jev.mjs";
-import { applyThinkingToList, toHostThinking } from "./lib/thinking.mjs";
+import { applyThinkingToList, minFallbacks, toHostThinking } from "./lib/thinking.mjs";
 import { createHealth } from "./lib/health.mjs";
 import { conversationKey, isFresh, createSessions, hash } from "./lib/sessions.mjs";
 import { createLog } from "./lib/decision-log.mjs";
@@ -97,6 +97,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
         native_tier: plan.applied?.native ?? null,
         clamped: !!plan.clamped, omitted: !!plan.omitted, reason: plan.reason ?? undefined,
         dropped: plan.dropped?.length ? plan.dropped : undefined,
+        ...(plan.floor ? { floor: true, would_keep: plan.wouldKeep, min_fallbacks: minFallbacks(policy) } : {}),
       };
       if (jevInfo) {
         jevInfo.effort_applied = plan.applied ?? null;

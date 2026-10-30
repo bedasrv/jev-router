@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRouter } from "../index.mjs";
 import { applyThinkingToList, missingThinking, planThinking, validateThinking } from "../lib/thinking.mjs";
-import { buildEffortPolicy, loadEffortData, unknownThinking } from "../ops/apply-effort-policy.mjs";
+import { buildEffortPolicy, loadEffortData, measuredKey, unknownThinking } from "../ops/apply-effort-policy.mjs";
 
 const effort = (values, map = {}) => ({ control: "effort", values, default: null, budget: null, map });
 const toggle = { control: "toggle", values: ["off", "on"], default: null, budget: null, map: { trivial: "off", normal: null, hard: null, frontier: null } };
@@ -92,7 +92,7 @@ test("applyThinkingToList omits normal/unknown and filters fallbacks to the same
     "b/high": { thinking: { control: "effort", values: ["high"], map: { trivial: null, normal: null, hard: "high", frontier: "high" } } },
     "c/low": { thinking: { control: "effort", values: ["low"], map: { trivial: "low", normal: null, hard: null, frontier: null } } },
     "d/none": { thinking: unknownThinking() },
-  } };
+  }, jev: { min_fallbacks: 0 } }; // the filter itself; the floor has its own test
   const normal = applyThinkingToList({ models: ["a/deep", "b/high", "c/low", "d/none"], abstract: "normal", policy: p });
   assert.deepEqual(normal.models, ["a/deep", "b/high", "c/low", "d/none"]);
   assert.equal(normal.omitted, true);
@@ -132,7 +132,7 @@ test("router applies the chosen tier, filters fallbacks, and logs need/native/mo
       "b/high": { thinking: { control: "effort", values: ["high"], map: { trivial: null, normal: null, hard: "high", frontier: "high" } } },
       "c/low": { thinking: { control: "effort", values: ["low"], map: { trivial: "low", normal: null, hard: null, frontier: null } } },
     },
-    jev: { mode: "on", threshold: 0.5, deadline_ms: 300, sources: [{ name: "a", url: "http://x", model: "jev" }] },
+    jev: { mode: "on", threshold: 0.5, deadline_ms: 300, min_fallbacks: 0, sources: [{ name: "a", url: "http://x", model: "jev" }] },
   };
   const { r, logs } = mk(p, answer("c1", "hard"));
   const out = await r.onRoute(user());
@@ -153,7 +153,7 @@ test("router normal path omits the field; frontier takes the draft max when it s
       "a/head": { thinking: { control: "effort", values: ["low", "high", "max"], map: { trivial: "low", normal: null, hard: "high", frontier: "max" } } },
       "b/low": { thinking: { control: "effort", values: ["low"], map: { trivial: "low", normal: null, hard: null, frontier: null } } },
     },
-    jev: { mode: "on", threshold: 0.5, deadline_ms: 300, sources: [{ name: "a", url: "http://x", model: "jev" }] },
+    jev: { mode: "on", threshold: 0.5, deadline_ms: 300, min_fallbacks: 0, sources: [{ name: "a", url: "http://x", model: "jev" }] },
   };
   let { r, logs } = mk(p, answer("c1", "normal"));
   let out = await r.onRoute(user());
@@ -182,4 +182,93 @@ test("fail-open applies normal (omit/default) for paid; free never gets effort",
   const free = await r.onRoute({ model: "free", headers: {}, body: { messages: [{ role: "user", content: "hi" }] } });
   assert.deepEqual(free.thinking, { control: "none" });
   assert.equal(logs().filter((l) => l.event === "decision").at(-1).effort.reason, "free_pool");
+});
+
+// The 2026-10-30 production map (ocpaid ids, measured data via thinking_aliases): glm-5.3-flash at frontier takes max and
+// muse-spark at trivial takes minimal, and no other paid model shares either value.
+const live = () => {
+  const p = {
+    order: { paid: ["ocpaid/opencode-go/deepseek-v4.1-flash", "ocpaid/opencode-go/mimo-v2.6-pro", "ocpaid/opencode-go/muse-spark-1.3-contributor", "ocpaid/opencode-go/qwen3.8-flash", "ocpaid/opencode-go/glm-5.3-flash", "ocpaid/opencode-go/gpt-6-luna"], free: ["ocpaid/opencode-go/beam-free"] },
+    models: {}, last_resort: {}, thinking_aliases: { ocpaid: ["ocgoa", "ocgob", "ocpv"] },
+  };
+  buildEffortPolicy(p, { table, draft });
+  return p;
+};
+
+test("fallback floor: a tier that would keep fewer than 2 fallbacks sends no effort and keeps the list", () => {
+  const p = live();
+  const [deep, , muse, qwen, glm] = p.order.paid;
+  const rot = (head) => [head, ...p.order.paid.filter((m) => m !== head)];
+  for (const [head, tier] of [[glm, "frontier"], [muse, "trivial"], [deep, "trivial"], [qwen, "trivial"]]) {
+    const r = applyThinkingToList({ models: rot(head), abstract: tier, policy: p });
+    assert.equal(r.floor, true, `${head} ${tier}`);
+    assert.equal(r.applied, null);
+    assert.equal(r.reason, "floor");
+    assert.deepEqual(r.models, rot(head)); // nothing dropped
+    assert.ok(r.wouldKeep < 3);
+  }
+  // hard keeps 3 fallbacks (deepseek, muse, glm, luna share high): above the floor, the effort applies
+  const hard = applyThinkingToList({ models: rot(deep), abstract: "hard", policy: p });
+  assert.deepEqual(hard.applied, { control: "effort", native: "high" });
+  assert.equal(hard.models.length, 4);
+  assert.equal(hard.floor, undefined);
+  // min_fallbacks is configurable: 1 lets deepseek trivial (1 fallback: glm) apply, 0 turns the floor off
+  const one = applyThinkingToList({ models: rot(deep), abstract: "trivial", policy: { ...p, jev: { min_fallbacks: 1 } } });
+  assert.deepEqual(one.applied, { control: "effort", native: "low" });
+  assert.deepEqual(one.models, [deep, glm]);
+  const off = applyThinkingToList({ models: rot(glm), abstract: "frontier", policy: { ...p, jev: { min_fallbacks: 0 } } });
+  assert.deepEqual(off.models, [glm]);
+});
+
+test("fallback floor never fires when filtering dropped nothing, however short the list", () => {
+  const p = live();
+  const glm = "ocpaid/opencode-go/glm-5.3-flash";
+  const solo = applyThinkingToList({ models: [glm], abstract: "frontier", policy: p });
+  assert.deepEqual(solo.applied, { control: "effort", native: "max" });
+  const pair = applyThinkingToList({ models: [glm, "ocpaid/opencode-go/deepseek-v4.1-flash"], abstract: "hard", policy: p });
+  assert.deepEqual(pair.applied, { control: "effort", native: "high" }); // both take high: 1 fallback is the whole list
+  assert.equal(pair.models.length, 2);
+});
+
+test("router logs effort.floor and sends {control:none} when the floor wins", async () => {
+  const p = live();
+  p.jev = { mode: "on", threshold: 0.5, deadline_ms: 300, sources: [{ name: "a", url: "http://x", model: "jev" }] };
+  p.order.paid = ["ocpaid/opencode-go/glm-5.3-flash", ...p.order.paid.filter((m) => !m.endsWith("glm-5.3-flash"))];
+  for (const id of p.order.paid) Object.assign(p.models[id], { context_length: 1000000, tools: true, vision: true });
+  const { r, logs } = mk(p, answer("c1", "frontier"));
+  const out = await r.onRoute(user());
+  assert.deepEqual(out.thinking, { control: "none" });
+  const d = logs().find((l) => l.event === "decision"), e = d.effort;
+  assert.deepEqual(out.models, d.models); assert.ok(out.models.length >= 3); assert.equal(e.dropped, undefined); // the full built list
+  assert.equal(e.floor, true); assert.equal(e.reason, "floor"); assert.equal(e.would_keep, 1); assert.equal(e.min_fallbacks, 2);
+  assert.equal(e.need, "frontier"); assert.equal(e.applied, null);
+});
+
+test("thinking_aliases: ocpaid ids take the measured ocgoa/ocgob/ocpv rows; without aliases they stay unknown", () => {
+  const p = live();
+  assert.equal(measuredKey("ocpaid/opencode-go/glm-5.3-flash", p, table), "ocgob/opencode-go/glm-5.3-flash");
+  assert.equal(measuredKey("ocgoa/opencode-go/deepseek-v4.1-flash", p, table), "ocgoa/opencode-go/deepseek-v4.1-flash"); // own row first
+  assert.equal(measuredKey("ocpaid/opencode-go/mimo-v2.6-pro", p, table), null); // never measured
+  assert.equal(p.models["ocpaid/opencode-go/deepseek-v4.1-flash"].thinking.map.hard, "high");
+  assert.equal(p.models["ocpaid/opencode-go/muse-spark-1.3-contributor"].thinking.map.trivial, "minimal");
+  assert.equal(p.models["ocpaid/opencode-go/mimo-v2.6-pro"].thinking.control, "none");
+  const res = buildEffortPolicy(structuredClone({ ...live(), models: {} }), { table, draft });
+  assert.equal(res.known.length, 6); assert.deepEqual(res.unknown, ["ocpaid/opencode-go/mimo-v2.6-pro"]);
+  assert.ok(res.aliased.includes("ocpaid/opencode-go/beam-free <- ocpv/opencode-go/beam-free"));
+  const bare = { order: { paid: ["ocpaid/opencode-go/glm-5.3-flash"], free: [] }, models: {} };
+  assert.deepEqual(buildEffortPolicy(bare, { table, draft }).unknown, ["ocpaid/opencode-go/glm-5.3-flash"]);
+  // a dead measured route is dead for its alias too
+  const dead = { order: { paid: [], free: ["ocpaid/opencode-go/longcat-2.5-preview-free", "ocpaid/opencode-go/beam-free"] }, models: {}, thinking_aliases: { ocpaid: ["ocpv"] } };
+  const d = buildEffortPolicy(dead, { table, draft });
+  assert.deepEqual(d.dead, ["ocpaid/opencode-go/longcat-2.5-preview-free"]);
+  assert.deepEqual(dead.order.free, ["ocpaid/opencode-go/beam-free"]);
+});
+
+test("policy validation: min_fallbacks and thinking_aliases shapes", async () => {
+  const { validate } = await import("../lib/policy.mjs");
+  const base = { order: { paid: [], free: [] } };
+  assert.doesNotThrow(() => validate({ ...base, jev: { min_fallbacks: 0 }, thinking_aliases: { ocpaid: ["ocgoa"] } }));
+  assert.throws(() => validate({ ...base, jev: { min_fallbacks: -1 } }), /min_fallbacks/);
+  assert.throws(() => validate({ ...base, jev: { min_fallbacks: 1.5 } }), /min_fallbacks/);
+  assert.throws(() => validate({ ...base, thinking_aliases: { ocpaid: "ocgoa" } }), /thinking_aliases/);
 });

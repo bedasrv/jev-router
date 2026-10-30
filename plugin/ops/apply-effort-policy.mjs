@@ -7,6 +7,9 @@
 // Usage: node ops/apply-effort-policy.mjs <policy.json> [--data-dir DIR] [--keep-dead] [--check]
 // Default: writes the policy. --check only prints/exit 1 when something would change.
 // Dead routes (table dead or draft skip) are removed from order/last_resort/models unless --keep-dead.
+// policy.thinking_aliases maps a connection prefix to the prefixes the data was measured under, e.g.
+// {"ocpaid": ["ocgoa", "ocgob", "ocpv"]} (all four reach the same sidecar): an id without its own row
+// takes the row of the same provider path under the first alias that has one.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,6 +52,18 @@ export function thinkingFromRoute(route, table, draft) {
   return { control: "effort", values, default: null, budget: null, map };
 }
 
+/** The effort-data key that describes `id`: its own row, else the first thinking_aliases match (or null). */
+export function measuredKey(id, policy, table) {
+  if (table[id]) return id;
+  const slash = id.indexOf("/");
+  if (slash < 0) return null;
+  for (const alias of policy?.thinking_aliases?.[id.slice(0, slash)] ?? []) {
+    const key = `${alias}${id.slice(slash)}`;
+    if (table[key]) return key;
+  }
+  return null;
+}
+
 export function unknownThinking() {
   return { control: "none", values: [], default: null, budget: null, map: Object.fromEntries(TIERS.map((t) => [t, null])) };
 }
@@ -78,9 +93,11 @@ export function buildEffortPolicy(policy, { table, draft, keepDead = false } = {
     ...Object.keys(policy.models ?? {}),
   ]);
   policy.models ??= {};
-  const known = [], unknown = [], dead = [];
+  const known = [], unknown = [], dead = [], aliased = [];
   for (const id of ids) {
-    const result = thinkingFromRoute(id, table, draft);
+    const key = measuredKey(id, policy, table);
+    if (key && key !== id) aliased.push(`${id} <- ${key}`);
+    const result = key ? thinkingFromRoute(key, table, draft) : null;
     if (!result) {
       unknown.push(id);
       policy.models[id] = { ...(policy.models[id] ?? {}), thinking: unknownThinking() };
@@ -95,7 +112,7 @@ export function buildEffortPolicy(policy, { table, draft, keepDead = false } = {
     known.push(id);
     policy.models[id] = { ...(policy.models[id] ?? {}), thinking: result };
   }
-  return { policy, known, unknown, dead };
+  return { policy, known, unknown, dead, aliased };
 }
 
 export function loadEffortData(dataDir = path.join(HERE, "effort")) {
@@ -119,7 +136,7 @@ function main() {
   const policy = readJson(policyFile);
   const before = JSON.stringify(policy);
   const { table, draft } = loadEffortData(dataDir);
-  const { known, unknown, dead } = buildEffortPolicy(policy, { table, draft, keepDead });
+  const { known, unknown, dead, aliased } = buildEffortPolicy(policy, { table, draft, keepDead });
 
   if (checkOnly) {
     if (before !== JSON.stringify(policy)) {
@@ -133,6 +150,7 @@ function main() {
 
   fs.writeFileSync(policyFile, JSON.stringify(policy, null, 1) + "\n");
   console.log(`wrote ${policyFile}: known=${known.length} unknown=${unknown.length} dead=${dead.length}`);
+  if (aliased.length) console.log(`via thinking_aliases: ${aliased.join(", ")}`);
   if (unknown.length) console.log(`unknown (control none, omit): ${unknown.join(", ")}`);
   if (dead.length) console.log(`${keepDead ? "kept dead" : "removed dead"}: ${dead.join(", ")}`);
 }

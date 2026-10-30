@@ -7,7 +7,7 @@ import { createFacts } from "./lib/facts.mjs";
 import { inspectRequest, usableWindow } from "./lib/eligibility.mjs";
 import { buildList } from "./lib/builder.mjs";
 import { missingThinking, thinkingFor } from "./lib/thinking.mjs";
-import { loadEffortData } from "./ops/apply-effort-policy.mjs";
+import { loadEffortData, measuredKey } from "./ops/apply-effort-policy.mjs";
 
 const file = process.argv[2] ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "policy.json");
 const policy = createPolicyLoader(file, (r) => console.error(JSON.stringify(r)))();
@@ -32,6 +32,9 @@ if (missing.length) console.log("\nNOT in any live listing (would 400 or hit a r
 const noThinking = missingThinking(policy);
 if (noThinking.length) console.log("\nNO thinking entry (unknown -> control none, field omitted until probed):", noThinking.join(", "));
 const { table, draft } = loadEffortData();
-const dead = [...policy.order.paid, ...policy.order.free, ...Object.values(policy.last_resort ?? {})].filter((id) => table[id]?.dead || draft[id]?.skip);
+const dead = [...policy.order.paid, ...policy.order.free, ...Object.values(policy.last_resort ?? {})].filter((id) => {
+  const key = measuredKey(id, policy, table);
+  return key && (table[key]?.dead || draft[key]?.skip);
+});
 if (dead.length) console.log("\nDEAD in effort data (remove with ops/apply-effort-policy.mjs):", [...new Set(dead)].join(", "));
 process.exit(0);
