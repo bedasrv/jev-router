@@ -42,7 +42,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       }
       const confident = res.ok && res.confidence >= thr;
       const outcome = !res.ok ? "unavailable" : !confident ? "unconfident" : cfg.mode === "on" ? "applied" : "shadow";
-      log({ event: "jev", id: ctx.requestId ?? null, mode: cfg.mode, pool, conv: hash(key), ok: res.ok, outcome, source: res.source, jev_model: res.model, latency_ms: res.latency_ms, usage: res.usage, shown,
+      log({ event: "jev", id: ctx.requestId ?? null, mode: cfg.mode, pool, conv: hash(key), ok: res.ok, outcome, source: res.source, jev_model: res.model, served_model: res.served_model, requested_model: res.requested_model, latency_ms: res.latency_ms, usage: res.usage, shown,
         pick, effort: res.ok ? res.effort : undefined, effort_confidence: res.ok ? res.effort_confidence : undefined,
         confidence: res.ok ? Number(res.confidence.toFixed(3)) : undefined, probabilities: res.ok ? res.probabilities : undefined,
         static_head: staticHead, differs: res.ok ? pick !== staticHead : undefined, would_apply: res.ok ? res.confidence >= thr && pick !== staticHead : undefined,

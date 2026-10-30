@@ -31,6 +31,14 @@ if (days.length) {
     const oc = Object.entries(d.outcomes).map(([k, v]) => `${k}=${v}`).join(" ");
     const priced = `cost ${d.priced ? $(d.cost_nusd) : "n/a"} list ${d.list_priced ? $(d.list_cost_nusd) : "n/a"}`;
     const lower = d.unpriced_attempts ? ` (lower bound: ${d.unpriced_attempts} timed-out attempts without usage)` : "";
-    console.log(`  ${day}: ${d.calls} calls (${oc}), tokens in ${d.prompt_tokens} (cached ${d.cached_tokens}) out ${d.completion_tokens}, ${priced}${lower}, models ${Object.keys(d.models).join(",") || "n/a"}`);
+    console.log(`  ${day}: ${d.calls} calls (${oc}), tokens in ${d.prompt_tokens} (cached ${d.cached_tokens}) out ${d.completion_tokens}, ${priced}${lower}, served ${Object.entries(d.served).map(([m, n]) => `${m}=${n}`).join(" ") || "n/a"}`);
+  }
+  // An alias such as ~typesafe/jev-latest moving to a new Jev version shows up as a change in the served set.
+  let prev = null;
+  for (const [day, d] of days) {
+    const cur = Object.keys(d.served).sort().join(",");
+    if (!cur) continue;
+    if (prev !== null && cur !== prev) console.log(`  served Jev model changed on ${day}: ${prev} -> ${cur}`);
+    prev = cur;
   }
 }

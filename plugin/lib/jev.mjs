@@ -113,7 +113,7 @@ export function createJev({ fetchImpl = fetch, readFile = (f) => fs.readFileSync
       if (left <= 50) break;
       if ((health.get(src.name)?.until ?? 0) > now()) { tried.push({ source: src.name, error: "cooling" }); continue; }
       const ts = now();
-      let usage, model = src.model;
+      let usage, served, model = src.model;
       try {
         const headers = { "content-type": "application/json" };
         const key = keyOf(src);
@@ -123,7 +123,8 @@ export function createJev({ fetchImpl = fetch, readFile = (f) => fs.readFileSync
         const j = await r.json();
         // Usage and the served model id are numbers and an id only; a failed parse still bills, so keep it.
         usage = normalizeUsage(j?.usage);
-        if (typeof j?.model === "string" && j.model) model = j.model.slice(0, 120);
+        // `served_model` is only what Jev answered with; `model` falls back to the configured alias (`jev_model`).
+        if (typeof j?.model === "string" && j.model) model = served = j.model.slice(0, 120);
         const answers = j?.answers;
         const a = answers?.model, e = answers?.effort;
         const ids = payload.ids;
@@ -131,7 +132,7 @@ export function createJev({ fetchImpl = fetch, readFile = (f) => fs.readFileSync
         if (!e || !ABSTRACT_LEVELS.includes(e.choice)) throw new Error("malformed effort answer");
         health.delete(src.name);
         return {
-          ok: true, source: src.name, model, latency_ms: now() - ts, ...(usage ? { usage } : {}),
+          ok: true, source: src.name, model, requested_model: src.model, ...(served ? { served_model: served } : {}), latency_ms: now() - ts, ...(usage ? { usage } : {}),
           choice: a.choice, index: ids.indexOf(a.choice), probabilities: a.probabilities, confidence: confidence(a.probabilities),
           effort: e.choice,
           ...(e.probabilities && typeof e.probabilities === "object" ? { effort_probabilities: e.probabilities, effort_confidence: confidence(e.probabilities) } : {}),
@@ -140,7 +141,7 @@ export function createJev({ fetchImpl = fetch, readFile = (f) => fs.readFileSync
       } catch (e) {
         cool(src.name); // timeout: aborted by source_timeout_ms after the request was sent, so possibly billed with no usage
         const timeout = e?.name === "TimeoutError" || e?.name === "AbortError";
-        tried.push({ source: src.name, error: String(e?.message ?? e), latency_ms: now() - ts, ...(timeout ? { timeout } : {}), ...(usage ? { model, usage } : {}) });
+        tried.push({ source: src.name, error: String(e?.message ?? e), latency_ms: now() - ts, ...(timeout ? { timeout } : {}), ...(served ? { served_model: served } : {}), ...(usage ? { model, usage } : {}) });
       }
     }
     return { ok: false, error: "no source answered", latency_ms: now() - t0, tried };
