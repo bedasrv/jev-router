@@ -1,0 +1,171 @@
+From 5a4f711328e905210b38342d5d03b52ce92a3e4f Mon Sep 17 00:00:00 2001
+From: jev-router-ci <jev-router-ci@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 18:35:38 +0700
+Subject: [PATCH] keepalive: carry route provenance in-band when the head is
+ committed early
+
+withEarlyStreamKeepalive commits a 200 head when the handler is slower than its threshold (1 s on chat), then forwards only the handler's body, so the route provenance headers patch 0007 stamps (x-omniroute-route, x-omniroute-attempts, x-router-reason, x-router-confidence) were lost on every slow call (about 86% of production calls on 2026-10-31). A new provenanceFrame option is called with the handler's SSE headers on the slow path; /v1/chat/completions passes openAiRouteProvenanceFrame, which writes one choices-less chunk (id/model keepalive) with an x_omniroute object of the allowlisted fields just before the forwarded body. The fast path is unchanged (headers verbatim, body untouched).
+---
+ open-sse/utils/earlyStreamKeepalive.ts   | 46 ++++++++++++++++++++++
+ src/app/api/v1/chat/completions/route.ts |  2 +
+ tests/unit/earlyStreamKeepalive.test.ts  | 50 +++++++++++++++++++++++-
+ 3 files changed, 97 insertions(+), 1 deletion(-)
+
+diff --git a/open-sse/utils/earlyStreamKeepalive.ts b/open-sse/utils/earlyStreamKeepalive.ts
+index 893b752c..5f67e2e1 100644
+--- a/open-sse/utils/earlyStreamKeepalive.ts
++++ b/open-sse/utils/earlyStreamKeepalive.ts
+@@ -102,6 +102,35 @@ export const OPENAI_RESPONSES_ERROR_FRAME = ENCODER.encode(
+   })}\n\n`
+ );
+ 
++/**
++ * Route provenance headers a plugin-routed combo stamps on its response (patch 0007), and the key each
++ * one takes in the in-band frame. On the slow path the 200 head is committed before the handler
++ * resolves, so these headers would be lost; the frame below carries them in the stream instead.
++ */
++const ROUTE_PROVENANCE_FIELDS: ReadonlyArray<[header: string, key: string]> = [
++  ["x-omniroute-route", "route"],
++  ["x-omniroute-attempts", "attempts"],
++  ["x-router-reason", "reason"],
++  ["x-router-confidence", "confidence"],
++];
++
++/**
++ * One OpenAI-compatible chunk with no choices and an `x_omniroute` object holding the route
++ * provenance headers of the handler's response, or null when it has none. Brand-neutral id/model
++ * (`keepalive`, like the startup frame), so clients that read only `choices` see nothing.
++ */
++export function openAiRouteProvenanceFrame(headers: Headers): Uint8Array | null {
++  const fields: Record<string, string> = {};
++  for (const [header, key] of ROUTE_PROVENANCE_FIELDS) {
++    const value = headers.get(header);
++    if (value) fields[key] = value;
++  }
++  if (!fields.route) return null;
++  return ENCODER.encode(
++    `data: ${JSON.stringify({ id: "chatcmpl-keepalive", object: "chat.completion.chunk", created: 0, model: "keepalive", choices: [], x_omniroute: fields })}\n\n`
++  );
++}
++
+ const MAX_RETRY_AFTER_SECONDS = 3600;
+ 
+ /**
+@@ -220,6 +249,12 @@ export type EarlyStreamKeepaliveOptions = {
+   applicationKeepalive?: { frame: Uint8Array; intervalMs: number };
+   /** Extra headers to include in the keepalive response (e.g. X-Correlation-Id). */
+   extraHeaders?: Record<string, string>;
++  /**
++   * Slow path only: called with the handler's SSE response headers once it resolves; a returned
++   * frame is written just before the forwarded body. The committed head cannot carry headers the
++   * handler set late (route provenance), so OpenAI chat passes `openAiRouteProvenanceFrame`.
++   */
++  provenanceFrame?: (headers: Headers) => Uint8Array | null;
+   /**
+    * Frame emitted if the handler ultimately fails (or the upstream stream dies
+    * mid-flight with zero bytes forwarded) after the slow path has already
+@@ -680,6 +715,17 @@ export async function withEarlyStreamKeepalive(
+           const isSse = contentType.includes("text/event-stream");
+ 
+           if (response.body && isSse) {
++            // Headers the committed head could not carry go in-band first (never fails the stream).
++            let lateHeaders: Uint8Array | null = null;
++            try {
++              lateHeaders = options.provenanceFrame?.(response.headers) ?? null;
++            } catch {
++              lateHeaders = null;
++            }
++            if (lateHeaders) {
++              controller.enqueue(lateHeaders);
++              recordClientBytes(lateHeaders);
++            }
+             // Real SSE stream — forward it verbatim.
+             upstreamReader = response.body.getReader();
+             let bytesForwarded = 0;
+diff --git a/src/app/api/v1/chat/completions/route.ts b/src/app/api/v1/chat/completions/route.ts
+index ee8d9fbe..86bb2156 100644
+--- a/src/app/api/v1/chat/completions/route.ts
++++ b/src/app/api/v1/chat/completions/route.ts
+@@ -18,6 +18,7 @@ import {
+   OPENAI_KEEPALIVE_FRAME,
+   OPENAI_STARTUP_FRAME,
+   withEarlyStreamKeepalive,
++  openAiRouteProvenanceFrame,
+ } from "@omniroute/open-sse/utils/earlyStreamKeepalive";
+ import { createStreamDeadlineSignal } from "@omniroute/open-sse/utils/streamDeadlineSignal";
+ import { resolveKeepaliveThreshold } from "@omniroute/open-sse/utils/keepaliveThreshold";
+@@ -335,6 +336,7 @@ export async function POST(request) {
+         keepaliveFrame: OPENAI_KEEPALIVE_FRAME,
+         startupFrame: OPENAI_STARTUP_FRAME,
+         errorFrame: OPENAI_CHAT_ERROR_FRAME,
++        provenanceFrame: openAiRouteProvenanceFrame,
+         correlationId: reqId,
+         extraHeaders: { "X-Correlation-Id": reqId },
+         deadlineController: routeDeadlineController,
+diff --git a/tests/unit/earlyStreamKeepalive.test.ts b/tests/unit/earlyStreamKeepalive.test.ts
+index c7a1594c..172b8482 100644
+--- a/tests/unit/earlyStreamKeepalive.test.ts
++++ b/tests/unit/earlyStreamKeepalive.test.ts
+@@ -1,6 +1,6 @@
+ import test from "node:test";
+ import assert from "node:assert/strict";
+-import { withEarlyStreamKeepalive } from "../../open-sse/utils/earlyStreamKeepalive.ts";
++import { openAiRouteProvenanceFrame, withEarlyStreamKeepalive } from "../../open-sse/utils/earlyStreamKeepalive.ts";
+ 
+ const ENCODER = new TextEncoder();
+ const DECODER = new TextDecoder();
+@@ -162,3 +162,51 @@ test("client abort stops keepalive and closes stream", async () => {
+   // Should have received some keepalive frames then closed
+   assert.ok(text.length >= 0, "stream should close on abort");
+ });
++
++// ── Route provenance on the slow path (jev-router patch 0009) ─────────────
++// A plugin-routed combo stamps x-omniroute-route & co on its response (patch 0007). When the
++// handler is slower than the threshold the 200 head is already committed, so those headers are
++// carried in-band as one choices-less chunk, written just before the forwarded body.
++
++const routed = (headers: Record<string, string>) =>
++  new Response(makeSseStream(['data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', "data: [DONE]\n\n"]), {
++    status: 200,
++    headers: { "content-type": "text/event-stream", ...headers },
++  });
++const provenanceHeaders = {
++  "x-omniroute-route": "ocpaid/opencode-go/deepseek-v4.1-flash",
++  "x-omniroute-attempts": "2",
++  "x-router-reason": "jev",
++  "x-router-confidence": "0.82",
++};
++
++test("slow path: route provenance headers are sent in-band before the body", async () => {
++  const delayed = new Promise<Response>((resolve) => setTimeout(() => resolve(routed(provenanceHeaders)), 60));
++  const result = await withEarlyStreamKeepalive(delayed, { thresholdMs: 10, intervalMs: 1000, provenanceFrame: openAiRouteProvenanceFrame });
++  const text = await drainStream(result.body!);
++  const frames = text.split("\n\n").filter((f) => f.startsWith("data: {"));
++  const meta = frames.map((f) => JSON.parse(f.slice(6))).find((c) => c.x_omniroute);
++  assert.deepEqual(meta?.x_omniroute, { route: "ocpaid/opencode-go/deepseek-v4.1-flash", attempts: "2", reason: "jev", confidence: "0.82" });
++  assert.deepEqual(meta?.choices, []);
++  assert.equal(meta?.model, "keepalive");
++  assert.ok(text.indexOf("x_omniroute") < text.indexOf('"content":"hi"'), "the provenance frame precedes the body");
++});
++
++test("slow path: no route header, no provenance frame", async () => {
++  const delayed = new Promise<Response>((resolve) => setTimeout(() => resolve(routed({})), 60));
++  const result = await withEarlyStreamKeepalive(delayed, { thresholdMs: 10, intervalMs: 1000, provenanceFrame: openAiRouteProvenanceFrame });
++  assert.ok(!(await drainStream(result.body!)).includes("x_omniroute"));
++});
++
++test("fast path: provenance stays in the headers and the body is untouched", async () => {
++  const result = await withEarlyStreamKeepalive(Promise.resolve(routed(provenanceHeaders)), { thresholdMs: 5000, provenanceFrame: openAiRouteProvenanceFrame });
++  assert.equal(result.headers.get("x-omniroute-route"), "ocpaid/opencode-go/deepseek-v4.1-flash");
++  assert.ok(!(await drainStream(result.body!)).includes("x_omniroute"));
++});
++
++test("the provenance frame carries only the allowlisted routing headers", () => {
++  const frame = openAiRouteProvenanceFrame(new Headers({ ...provenanceHeaders, authorization: "Bearer secret", "x-other": "v" }));
++  const chunk = JSON.parse(new TextDecoder().decode(frame!).replace(/^data: /, ""));
++  assert.deepEqual(Object.keys(chunk.x_omniroute).sort(), ["attempts", "confidence", "reason", "route"]);
++  assert.equal(openAiRouteProvenanceFrame(new Headers({ "x-router-reason": "static" })), null);
++});
+-- 
+2.47.3
+
