@@ -2,6 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { ABSTRACT_LEVELS, thinkingPhrase } from "./thinking.mjs";
 import { normalizeUsage } from "./usage.mjs";
+import { headerValue, isApiSession } from "./sessions.mjs";
 
 // Jev (TypeSafe classifier) client: one batched `choice` question over a shortlist, priority failover
 // across sources, per-source cooldown, an overall deadline. Never throws: returns {ok:false,error}.
@@ -67,10 +68,7 @@ export function askText(body, head = 600, tail = 600) {
 // system prompt, how many tools. API calls of the app are stateless and carry the session id `v<voucher>`
 // (warslop API-12a), so jev.api_session_pattern tells them from the chat app's conversations.
 export function requestSource(headers, cfg) {
-  const name = (cfg?.session_header ?? "x-opencode-session").toLowerCase();
-  const v = [Object.entries(headers ?? {}).find(([k]) => k.toLowerCase() === name)?.[1]].flat()[0];
-  let re; try { re = new RegExp(cfg?.api_session_pattern ?? "^v[0-9]+$"); } catch { re = /^v[0-9]+$/; }
-  return typeof v === "string" && re.test(v) ? "API client" : "chat app";
+  return isApiSession(headerValue(headers, cfg?.session_header ?? "x-opencode-session"), cfg) ? "API client" : "chat app";
 }
 export const toolsWord = (n) => (!n ? "none" : n <= 8 ? "few" : "many");
 const hasSystem = (body) => (body?.messages ?? []).some((m) => m?.role === "system" || m?.role === "developer");

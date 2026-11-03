@@ -212,6 +212,44 @@ test("stickiness: a new turn of a conversation keeps the previous model and tier
   out = await sh.r.onRoute(say("second", prior));
   assert.equal(out.reason, "static"); assert.equal(payloads.at(-1).state.conversation, "follow-up turn");
 });
+test("stickiness keys on Warslop's real header shape: x-opencode-session, prompt_cache_key, no x-omniroute-session-id", async () => {
+  // src/upstream.ts: the conversation id goes in x-opencode-session and prompt_cache_key; src/turn.ts: a new
+  // conversation's system text is the same for every guest (empty memory block).
+  const sys = { role: "system", content: "You are Warslop.\n<memory></memory>" };
+  const call = (sid, rid, msgs) => ({ model: "paid", requestId: rid, headers: { authorization: "Bearer x", "content-type": "application/json", "x-opencode-session": sid, "x-correlation-id": rid + "-corr" }, body: { model: "paid", messages: [sys, ...msgs], stream: true, stream_options: { include_usage: true }, prompt_cache_key: sid } });
+  let answerNow = { ...hit, pick: "c/p3", effort: "hard", confidence: 0.9, effort_confidence: 0.9 };
+  const { r, logs } = mk(cfg({ mode: "on" }), { ask: async (c, payload) => stub(answerNow).ask(c, payload) });
+  let out = await r.onRoute(call("conv-a", "a1", [{ role: "user", content: "halo" }]));
+  assert.equal(out.models[0], "c/p3");
+  // a second guest opens with the same "halo" in a new conversation; Jev is unsure: the configured head, not c/p3
+  answerNow = { ...hit, pick: "b/p2", effort: "trivial", confidence: 0.2, effort_confidence: 0.2 };
+  out = await r.onRoute(call("conv-b", "b1", [{ role: "user", content: "halo" }]));
+  assert.equal(out.models[0], "a/p1"); assert.equal(out.reason, "static");
+  assert.notEqual(logs().find((l) => l.id === "a1" && l.event === "decision").conv, logs().find((l) => l.id === "b1" && l.event === "decision").conv);
+  // the first guest's next turn is the same conversation: sticky
+  out = await r.onRoute(call("conv-a", "a2", [{ role: "user", content: "halo" }, { role: "assistant", content: "hai" }, { role: "user", content: "apa kabar" }]));
+  assert.equal(out.models[0], "c/p3"); assert.equal(out.reason, "static:sticky");
+});
+test("stateless API calls (session v<voucher>) get no new-turn stickiness; a tool loop still keeps its head", async () => {
+  const call = (rid, msgs) => ({ model: "paid", requestId: rid, headers: { "x-opencode-session": "v42" }, body: { messages: msgs, prompt_cache_key: "v42" } });
+  let answerNow = { ...hit, pick: "c/p3", effort: "hard", confidence: 0.9, effort_confidence: 0.9 };
+  let payloads = [];
+  const { r, logs } = mk(cfg({ mode: "on" }), { ask: async (c, payload) => { payloads.push(payload); return stub(answerNow).ask(c, payload); } });
+  const opening = [{ role: "user", content: "summarise this" }];
+  let out = await r.onRoute(call("v1", opening));
+  assert.equal(out.models[0], "c/p3");
+  // the same voucher sends another call, even one that replays a prior exchange: decided on its own
+  answerNow = { ...hit, pick: "b/p2", confidence: 0.2, effort_confidence: 0.2 };
+  out = await r.onRoute(call("v2", [...opening, { role: "assistant", content: "ok" }, { role: "user", content: "again" }]));
+  assert.equal(out.models[0], "a/p1"); assert.equal(out.reason, "static");
+  assert.equal(payloads.at(-1).state.previous_model, undefined);
+  assert.equal(logs().filter((l) => l.event === "decision").at(-1).sticky, undefined);
+  // a continuation (tool result waiting) of the first call keeps its head
+  answerNow = { ...hit, pick: "c/p3", effort: "hard", confidence: 0.9, effort_confidence: 0.9 };
+  await r.onRoute(call("v3", [{ role: "user", content: "use the tool" }]));
+  out = await r.onRoute(call("v4", [{ role: "user", content: "use the tool" }, { role: "assistant", content: null, tool_calls: [{ id: "t", type: "function", function: { name: "f", arguments: "{}" } }] }, { role: "tool", tool_call_id: "t", content: "42" }]));
+  assert.equal(out.models[0], "c/p3");
+});
 test("askText keeps the head and the tail of a long ask", () => {
   const long = "A".repeat(700) + "middle" + "Z".repeat(700);
   const t = askText({ messages: [{ role: "user", content: long }] });

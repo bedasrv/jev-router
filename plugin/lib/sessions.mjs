@@ -2,14 +2,38 @@ import crypto from "node:crypto";
 
 export const hash = (s) => crypto.createHash("sha256").update(s).digest("hex").slice(0, 12);
 
-export function conversationKey(headers, body) {
-  const h = headers?.["x-omniroute-session-id"] ?? headers?.["X-OmniRoute-Session-Id"];
-  if (h) return "s:" + hash(String(h));
+// The value of a request header, by case-insensitive name (first value if repeated).
+export const headerValue = (headers, name) => {
+  const n = String(name).toLowerCase();
+  const v = [Object.entries(headers ?? {}).find(([k]) => k.toLowerCase() === n)?.[1]].flat()[0];
+  return typeof v === "string" && v ? v : null;
+};
+
+// The key a conversation's stickiness and continuation state live under, in order:
+// 1. the configured session header (jev.session_header, default x-opencode-session): Warslop sends its conversation
+//    id there on every call (src/upstream.ts). Stateless API calls carry `v<voucher>` (jev.api_session_pattern) for
+//    every call of one voucher, so for those the session id is mixed with the content hash: one call's tool loop
+//    keeps its key, two separate calls do not share one just because they come from the same voucher;
+// 2. x-omniroute-session-id;
+// 3. a hash of the system prompt and the first user message (clients that name no session; new conversations with
+//    the same system text and the same opening share this key).
+export function conversationKey(headers, body, cfg) {
   const msgs = body?.messages ?? [];
   const sys = msgs.find((m) => m.role === "system" || m.role === "developer");
   const first = msgs.find((m) => m.role === "user");
   const t = (m) => (typeof m?.content === "string" ? m.content : JSON.stringify(m?.content ?? ""));
-  return "h:" + hash(t(sys) + "\u0000" + t(first));
+  const content = () => t(sys) + "\u0000" + t(first);
+  const sid = headerValue(headers, cfg?.session_header ?? "x-opencode-session");
+  if (sid) return isApiSession(sid, cfg) ? "a:" + hash(sid + "\u0000" + content()) : "c:" + hash(sid);
+  const h = headerValue(headers, "x-omniroute-session-id");
+  if (h) return "s:" + hash(h);
+  return "h:" + hash(content());
+}
+
+// A stateless API call of the app: its session id is `v<voucher>` (jev.api_session_pattern).
+export function isApiSession(sid, cfg) {
+  let re; try { re = new RegExp(cfg?.api_session_pattern ?? "^v[0-9]+$"); } catch { re = /^v[0-9]+$/; }
+  return typeof sid === "string" && re.test(sid);
 }
 
 // Fresh task = no tool result is waiting for the model's reply. Some clients (opencode) append a

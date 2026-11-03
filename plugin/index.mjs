@@ -7,7 +7,7 @@ import { buildList, eligibleIds } from "./lib/builder.mjs";
 import { createJev, buildPayload, askText, requestSource } from "./lib/jev.mjs";
 import { applyThinkingToList, minFallbacks, toHostThinking } from "./lib/thinking.mjs";
 import { createHealth } from "./lib/health.mjs";
-import { conversationKey, isFresh, createSessions, hash } from "./lib/sessions.mjs";
+import { conversationKey, isFresh, createSessions, hash, headerValue, isApiSession } from "./lib/sessions.mjs";
 import { createLog } from "./lib/decision-log.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -28,9 +28,8 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
   function jevSkipped(cfg, headers) {
     const list = cfg?.skip_sessions;
     if (!Array.isArray(list) || !list.length) return false;
-    const name = (cfg.session_header ?? "x-opencode-session").toLowerCase();
-    const v = Object.entries(headers ?? {}).find(([k]) => k.toLowerCase() === name)?.[1];
-    return [v].flat().some((x) => typeof x === "string" && list.includes(x));
+    const v = headerValue(headers, cfg.session_header ?? "x-opencode-session");
+    return !!v && list.includes(v);
   }
 
   // Jev: shadow = ask in the background and only log; on = wait (<= deadline) and lead with a confident pick.
@@ -74,12 +73,14 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     syncHealth(policy);
     const body = ctx.body ?? {};
     const req = inspectRequest(body);
-    const key = conversationKey(ctx.headers, body);
+    const key = conversationKey(ctx.headers, body, policy.jev);
     const fresh = isFresh(body);
     const known = sessions.get(key, now());
     // Stickiness: a continuation keeps the head; with Jev on, a new turn of an existing conversation also keeps the
     // previous model and tier unless Jev is confident in a different one (switching model loses the prompt cache).
-    const sticky = fresh && !!known && policy.jev?.mode === "on";
+    // Stateless API calls (session `v<voucher>`) have no new turns: each fresh call is decided on its own.
+    const api = isApiSession(headerValue(ctx.headers, policy.jev?.session_header ?? "x-opencode-session"), policy.jev);
+    const sticky = fresh && !!known && !api && policy.jev?.mode === "on";
     const prev = fresh && !sticky ? null : known;
     const f = factsSrc.get(policy);
     let preferred = prev?.head ?? null;
@@ -87,7 +88,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     let jevInfo;
     let desiredEffort = null, effortSource = null;
     const skipped = jevSkipped(policy.jev, ctx.headers);
-    const step = models.length && !skipped ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0], previous: fresh && known ? known : null }) : null;
+    const step = models.length && !skipped ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0], previous: fresh && known && !api ? known : null }) : null;
     if (step?.mode === "on") {
       const out = await step.promise;
       if (out?.res.ok && out.res.confidence >= out.thr) {
