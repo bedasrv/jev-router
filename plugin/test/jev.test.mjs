@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRouter } from "../index.mjs";
-import { createJev, confidence, askText, describeCandidate, buildPayload } from "../lib/jev.mjs";
+import { createJev, confidence, askText, describeCandidate, buildPayload, descriptionProblems, shuffleFor, requestSource, INSTRUCTIONS } from "../lib/jev.mjs";
 
 const answer = (choice, probs, effort = "normal", effortProbs = { trivial: 0.05, normal: 0.6, hard: 0.25, frontier: 0.1 }) => ({ ok: true, status: 200, json: async () => ({ answers: { model: { choice, probabilities: probs }, effort: { choice: effort, probabilities: effortProbs } } }) });
 const src = (name) => ({ name, url: `http://x/${name}`, model: "jev-1.13-free" });
@@ -26,8 +26,9 @@ function mk(jev, jevClient, edit) {
   return { r, logs: () => fs.readFileSync(path.join(dir, "log.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) };
 }
 const turn = (t = "refactor the module") => ({ model: "paid", requestId: "r1", headers: {}, body: { messages: [{ role: "user", content: t }] } });
-const stub = (res) => ({ ask: async () => res });
-const hit = { ok: true, source: "a", latency_ms: 5, index: 1, choice: "c2", probabilities: { c1: 0.05, c2: 0.9, c3: 0.05 }, confidence: 0.85, effort: "hard", effort_confidence: 0.6, tried: [] };
+// A fake Jev answers by model id (`pick`): the shown order is shuffled per request, so the option id is looked up.
+const stub = (res) => ({ ask: async (_cfg, payload) => (res.pick && payload?.order ? { ...res, index: payload.order.indexOf(res.pick), choice: payload.ids[payload.order.indexOf(res.pick)] } : res) });
+const hit = { ok: true, source: "a", latency_ms: 5, pick: "b/p2", probabilities: { c1: 0.05, c2: 0.9, c3: 0.05 }, confidence: 0.85, effort: "hard", effort_confidence: 0.6, tried: [] };
 
 test("shadow: returns the static list at once, logs Jev's differing pick afterwards", async () => {
   const { r, logs } = mk(cfg(), stub(hit));
@@ -126,10 +127,105 @@ test("jev.skip_sessions: the app's canary session is never sent to Jev; other se
   await r.onRoute(canary({ "x-opencode-session": "canary" }));
   assert.equal(calls, 2);
 });
-test("tie-break: options that can all do it go to c1, the head of the configured order (not the cheaper one)", () => {
-  const pl = buildPayload({ pool: "paid", ask: "x", req: { tokens: 10, images: 0, usesTools: false }, shown: ["a/p1", "b/p2"], facts: {}, policy: { models: {} } });
-  assert.match(pl.questions.model.instructions.tie_break, /^If several options can fully do it, pick c1, the default; /);
-  assert.ok(!/cost/.test(pl.questions.model.instructions.tie_break));
+test("instructions are neutral: no audience, no language line, no tie-break to c1", () => {
+  const txt = JSON.stringify(INSTRUCTIONS);
+  assert.equal(INSTRUCTIONS.question, "Which model should answer this request?");
+  assert.ok(!/cafe|guest|Indonesian|premium|paid|c1/i.test(txt), txt);
+  assert.equal(INSTRUCTIONS.tie_break, undefined);
+  const pl = buildPayload({ ask: "x", req: { tokens: 10, images: 0, usesTools: false }, shown: ["a/p1", "b/p2"], facts: {}, policy: { models: {} } });
+  assert.equal(pl.state.pool, undefined);
+});
+test("state facts are named fields: source, system_prompt, tools, previous_model/previous_tier on a follow-up", () => {
+  const req = (n, system) => ({ tokens: 10, images: 0, usesTools: n > 0, toolCount: n, system });
+  const shown = ["a/p1", "b/p2", "c/p3"];
+  let pl = buildPayload({ ask: "x", req: req(0, false), shown, facts: {}, policy: { models: {} }, seed: "r1" });
+  assert.deepEqual(pl.state, { request: "x", source: "chat app", system_prompt: "absent", tools: "none", has_image: "no", size: "short conversation" });
+  pl = buildPayload({ ask: "x", req: req(3, true), shown, facts: {}, policy: { models: {} }, seed: "r1", source: "API client", previous: { head: "c/p3", effort: "hard" } });
+  assert.equal(pl.state.source, "API client"); assert.equal(pl.state.system_prompt, "present"); assert.equal(pl.state.tools, "few");
+  assert.equal(pl.state.conversation, "follow-up turn"); assert.equal(pl.state.previous_tier, "hard");
+  assert.equal(pl.order[pl.ids.indexOf(pl.state.previous_model)], "c/p3"); // the option id of the previous model, wherever it is shown
+  assert.equal(buildPayload({ ask: "x", req: req(20, true), shown, facts: {}, policy: { models: {} } }).state.tools, "many");
+  // the previous model is not offered (hidden or cooling): only its tier is said
+  pl = buildPayload({ ask: "x", req: req(0, false), shown, facts: {}, policy: { models: {} }, previous: { head: "z/gone", effort: "normal" } });
+  assert.equal(pl.state.previous_model, undefined); assert.equal(pl.state.previous_tier, "normal");
+  // the app's stateless API calls carry session v<voucher> (warslop API-12a); the chat app sends its conversation id
+  assert.equal(requestSource({ "x-opencode-session": "v42" }, {}), "API client");
+  assert.equal(requestSource({ "X-OpenCode-Session": "4c1d9e" }, {}), "chat app");
+  assert.equal(requestSource({}, {}), "chat app");
+  assert.equal(requestSource({ "x-s": "api-7" }, { session_header: "x-s", api_session_pattern: "^api-" }), "API client");
+});
+test("shuffle: the shown order varies by request id, is the same for the same id, and maps Jev's choice back", async () => {
+  const ids = ["a", "b", "c", "d", "e", "f"];
+  assert.deepEqual(shuffleFor(ids, "r1"), shuffleFor(ids, "r1"));
+  const seen = new Set(Array.from({ length: 40 }, (_, i) => shuffleFor(ids, `req-${i}`)[0]));
+  assert.equal(seen.size, 6, "every option leads for some request");
+  assert.deepEqual([...shuffleFor(ids, "r9")].sort(), ids);
+  // the router applies the model Jev chose, not whatever the configured order has at that position
+  for (const id of ["r1", "r2", "r3", "r4"]) {
+    const { r } = mk(cfg({ mode: "on" }), stub({ ...hit, pick: "c/p3" }));
+    const out = await r.onRoute({ ...turn(), requestId: id });
+    assert.equal(out.models[0], "c/p3", id);
+  }
+});
+test("jev.hidden: a hidden model is never shown to Jev but stays a fallback route", async () => {
+  let shown;
+  const spy = { ask: async (_c, payload) => { shown = payload.order; return { ok: false, error: "x", tried: [] }; } };
+  const { r } = mk(cfg({ mode: "on", hidden: ["c/p3"] }), spy);
+  const out = await r.onRoute(turn());
+  assert.deepEqual([...shown].sort(), ["a/p1", "b/p2"]);
+  assert.ok(out.models.includes("c/p3"));
+});
+test("stickiness: a new turn of a conversation keeps the previous model and tier unless Jev is confident otherwise", async () => {
+  const h = { "x-omniroute-session-id": "s-sticky" };
+  const say = (t, prior = []) => ({ model: "paid", requestId: t, headers: h, body: { messages: [...prior, { role: "user", content: t }] } });
+  const prior = [{ role: "user", content: "first" }, { role: "assistant", content: "done" }];
+  let answerNow = { ...hit, pick: "c/p3", effort: "hard", confidence: 0.9, effort_confidence: 0.9 };
+  let payloads = [];
+  const jev = { ask: async (c, payload) => { payloads.push(payload); return stub(answerNow).ask(c, payload); } };
+  const { r, logs } = mk(cfg({ mode: "on" }), jev);
+  let out = await r.onRoute(say("first"));
+  assert.equal(out.models[0], "c/p3"); assert.deepEqual(out.thinking, { control: "effort", value: "high" });
+  // unconfident on the next turn: the previous model and tier stay (not the configured head a/p1, not normal)
+  answerNow = { ...hit, pick: "a/p1", effort: "trivial", confidence: 0.2, effort_confidence: 0.2 };
+  out = await r.onRoute(say("second", prior));
+  assert.equal(out.models[0], "c/p3"); assert.deepEqual(out.thinking, { control: "effort", value: "high" });
+  assert.equal(out.reason, "static:sticky");
+  const st = payloads.at(-1).state;
+  assert.equal(payloads.at(-1).order[payloads.at(-1).ids.indexOf(st.previous_model)], "c/p3"); assert.equal(st.previous_tier, "hard");
+  assert.equal(logs().filter((l) => l.event === "decision").at(-1).sticky, true);
+  // confident in another model, unsure about the tier: the model switches, the tier stays
+  answerNow = { ...hit, pick: "b/p2", effort: "trivial", confidence: 0.9, effort_confidence: 0.1 };
+  out = await r.onRoute(say("third", prior));
+  assert.equal(out.models[0], "b/p2"); assert.deepEqual(out.thinking, { control: "effort", value: "high" });
+  // confident in both: both switch
+  answerNow = { ...hit, pick: "a/p1", effort: "trivial", confidence: 0.9, effort_confidence: 0.9 };
+  out = await r.onRoute(say("fourth", prior));
+  assert.equal(out.models[0], "a/p1"); assert.deepEqual(out.thinking, { control: "effort", value: "none" });
+  // a brand-new conversation that Jev is unsure about takes the configured head (the default in code)
+  answerNow = { ...hit, pick: "c/p3", confidence: 0.2 };
+  out = await r.onRoute({ model: "paid", requestId: "n1", headers: { "x-omniroute-session-id": "s-new" }, body: { messages: [{ role: "user", content: "hi" }] } });
+  assert.equal(out.models[0], "a/p1"); assert.equal(out.reason, "static");
+  // shadow mode: no stickiness (the static order is what is served), but Jev still sees the follow-up facts
+  payloads = [];
+  const sh = mk(cfg({ mode: "shadow" }), jev);
+  await sh.r.onRoute(say("first"));
+  out = await sh.r.onRoute(say("second", prior));
+  assert.equal(out.reason, "static"); assert.equal(payloads.at(-1).state.conversation, "follow-up turn");
+});
+test("askText keeps the head and the tail of a long ask", () => {
+  const long = "A".repeat(700) + "middle" + "Z".repeat(700);
+  const t = askText({ messages: [{ role: "user", content: long }] });
+  assert.ok(t.startsWith("A".repeat(600)) && t.endsWith("Z".repeat(600)));
+  assert.ok(!t.includes("middle")); assert.ok(t.length < 1210);
+  assert.equal(askText({ messages: [{ role: "user", content: "short" }] }), "short");
+});
+test("description rules: no model names, digits, negations or references to other options; cost is one word", () => {
+  const ids = ["ocpaid/opencode-go/deepseek-v4.1-flash", "ocpaid/opencode-go/mimo-v2.6-pro"];
+  assert.deepEqual(descriptionProblems({ good_at: "agentic work and tool use", weak_at: "slow start", cost: "standard" }, ids), []);
+  const bad = descriptionProblems({ good_at: "better than deepseek at 3 things", weak_at: "not for small talk", cost: "included in the subscription" }, ids);
+  for (const want of ["good_at: digits", "good_at: names a model (deepseek)", "good_at: refers to other options (better)", "weak_at: negation (not)", "cost: one of"])
+    assert.ok(bad.some((p) => p.startsWith(want)), `${want}: ${bad}`);
+  assert.ok(descriptionProblems({ good_at: "like mimo", cost: "pricier" }, ids).some((p) => p.includes("names a model")));
 });
 test("client: failover to the next source, cooldown after three failures, malformed answers rejected", async () => {
   const calls = []; let t = 0;
@@ -156,7 +252,7 @@ test("helpers: confidence formula, ask text after the last assistant, descriptio
   assert.deepEqual(Object.keys(pl.questions.model.criteria), ["c1", "c2"]); assert.ok(pl.questions.model.criteria.c1.includes("huge"));
   assert.deepEqual(pl.ids, ["c1", "c2"]); assert.deepEqual(pl.effortChoices, ["trivial", "normal", "hard", "frontier"]);
   assert.deepEqual(Object.keys(pl.questions.effort.criteria), ["trivial", "normal", "hard", "frontier"]);
-  assert.equal(pl.state.needs_tools.startsWith("yes"), true); assert.equal(typeof pl.state.size, "string");
+  assert.equal(pl.state.tools, "few"); assert.equal(typeof pl.state.size, "string");
 });
 test("structured options: good_at/weak_at/cost/thinking become an object without digits; the model name is never sent", () => {
   const d = describeCandidate("ocgoa/x-5.3", { context_length: 1e6 }, { good_at: "Indonesian writing, code 4x", weak_at: "very long math", cost: "included in subscription", thinking });
@@ -165,8 +261,8 @@ test("structured options: good_at/weak_at/cost/thinking become an object without
   const pl = buildPayload({ pool: "free", ask: "halo", req: { tokens: 10, images: 1, usesTools: false }, shown: ["ocgoa/x-5.3", "openrouter/y"], facts: {}, policy: { models: { "ocgoa/x-5.3": { good_at: "chat", cost: "free", thinking } } } });
   const sent = JSON.stringify({ state: pl.state, questions: pl.questions });
   assert.ok(!sent.includes("ocgoa") && !sent.includes("openrouter")); assert.equal(pl.state.has_image, "yes");
-  assert.equal(typeof pl.questions.model.criteria.c2, "string"); // no good_at: the one-line fallback
-  assert.ok(pl.questions.model.criteria.c2.includes("cannot be adjusted")); // unknown model: omit
+  assert.equal(typeof pl.questions.model.criteria[pl.ids[pl.order.indexOf("openrouter/y")]], "string"); // no good_at: the one-line fallback
+  assert.ok(pl.questions.model.criteria[pl.ids[pl.order.indexOf("openrouter/y")]].includes("fixed thinking level")); // unknown model: omit
 });
 test("client: the request body carries model, state and questions only (no internal ids)", async () => {
   let sentBody; const jev = createJev({ fetchImpl: async (_u, init) => { sentBody = JSON.parse(init.body); return answer("c1", { c1: 1, c2: 0 }); } });

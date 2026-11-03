@@ -19,7 +19,9 @@ export function inspectRequest(body) {
   const tokens = Math.ceil(ascii / 4 + nonAscii / 2) + images * Math.ceil(IMAGE_CHARS / 4);
   const reserve = Number.isFinite(body?.max_tokens) ? body.max_tokens
     : Number.isFinite(body?.max_completion_tokens) ? Math.min(body.max_completion_tokens, RESERVE_DEFAULT) : RESERVE_DEFAULT;
-  return { tokens, reserve, images, usesTools: Array.isArray(body?.tools) && body.tools.length > 0 };
+  const toolCount = Array.isArray(body?.tools) ? body.tools.length : 0;
+  const system = (body?.messages ?? []).some((m) => m?.role === "system" || m?.role === "developer");
+  return { tokens, reserve, images, usesTools: toolCount > 0, toolCount, system };
 }
 
 export function usableWindow(f, reserve) {

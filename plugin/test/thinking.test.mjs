@@ -26,7 +26,8 @@ function mk(policy, jevClient) {
   };
 }
 const user = (t = "hello") => ({ model: "paid", requestId: "req", headers: {}, body: { messages: [{ role: "user", content: t }] } });
-const answer = (pick, effortLevel) => ({ ask: async () => ({ ok: true, source: "a", latency_ms: 1, index: 0, choice: pick, probabilities: { c1: 0.95, c2: 0.05 }, confidence: 0.9, effort: effortLevel, tried: [] }) });
+// Jev confidently picks model id `pick`, wherever the shuffle showed it.
+const answer = (pick, effortLevel) => ({ ask: async (_cfg, payload) => { const index = payload.order.indexOf(pick); return { ok: true, source: "a", latency_ms: 1, index, choice: payload.ids[index], probabilities: { c1: 0.95, c2: 0.05 }, confidence: 0.9, effort: effortLevel, tried: [] }; } });
 
 test("generator imports the measured table/draft for every shape and skips the dead route", () => {
   const routes = Object.keys(table);
@@ -134,7 +135,7 @@ test("router applies the chosen tier, filters fallbacks, and logs need/native/mo
     },
     jev: { mode: "on", threshold: 0.5, deadline_ms: 300, min_fallbacks: 0, sources: [{ name: "a", url: "http://x", model: "jev" }] },
   };
-  const { r, logs } = mk(p, answer("c1", "hard"));
+  const { r, logs } = mk(p, answer("a/head", "hard"));
   const out = await r.onRoute(user());
   assert.deepEqual(out.models, ["a/head", "b/high"]);
   assert.deepEqual(out.thinking, { control: "effort", value: "high" });
@@ -155,14 +156,14 @@ test("router normal path omits the field; frontier takes the draft max when it s
     },
     jev: { mode: "on", threshold: 0.5, deadline_ms: 300, min_fallbacks: 0, sources: [{ name: "a", url: "http://x", model: "jev" }] },
   };
-  let { r, logs } = mk(p, answer("c1", "normal"));
+  let { r, logs } = mk(p, answer("a/head", "normal"));
   let out = await r.onRoute(user());
   assert.deepEqual(out.thinking, { control: "none" });
   assert.deepEqual(out.models, ["a/head", "b/low"]);
   let e = logs().find((l) => l.event === "decision").effort;
   assert.equal(e.omitted, true); assert.equal(e.reason, "default");
 
-  ({ r, logs } = mk(p, answer("c1", "frontier")));
+  ({ r, logs } = mk(p, answer("a/head", "frontier")));
   out = await r.onRoute(user());
   assert.deepEqual(out.thinking, { control: "effort", value: "max" });
   assert.deepEqual(out.models, ["a/head"]); // b/low cannot take max
@@ -235,7 +236,7 @@ test("router logs effort.floor and sends {control:none} when the floor wins", as
   p.jev = { mode: "on", threshold: 0.5, deadline_ms: 300, sources: [{ name: "a", url: "http://x", model: "jev" }] };
   p.order.paid = ["ocpaid/opencode-go/glm-5.3-flash", ...p.order.paid.filter((m) => !m.endsWith("glm-5.3-flash"))];
   for (const id of p.order.paid) Object.assign(p.models[id], { context_length: 1000000, tools: true, vision: true });
-  const { r, logs } = mk(p, answer("c1", "frontier"));
+  const { r, logs } = mk(p, answer("ocpaid/opencode-go/glm-5.3-flash", "frontier"));
   const out = await r.onRoute(user());
   assert.deepEqual(out.thinking, { control: "none" });
   const d = logs().find((l) => l.event === "decision"), e = d.effort;

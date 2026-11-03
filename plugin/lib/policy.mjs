@@ -38,6 +38,10 @@ export function validate(p) {
   if (ss !== undefined && !(Array.isArray(ss) && ss.every((x) => typeof x === "string" && x))) throw new Error("jev.skip_sessions must be an array of session ids");
   const sh = p.jev?.session_header;
   if (sh !== undefined && !(typeof sh === "string" && sh)) throw new Error("jev.session_header must be a header name");
+  const hid = p.jev?.hidden;
+  if (hid !== undefined && !(Array.isArray(hid) && hid.every((x) => typeof x === "string" && x))) throw new Error("jev.hidden must be an array of model ids");
+  const asp = p.jev?.api_session_pattern;
+  if (asp !== undefined) { if (typeof asp !== "string") throw new Error("jev.api_session_pattern must be a regular expression"); new RegExp(asp); }
   const mf = p.jev?.min_fallbacks;
   if (mf !== undefined && !(Number.isInteger(mf) && mf >= 0)) throw new Error("jev.min_fallbacks must be a non-negative integer");
   // Missing thinking is allowed at runtime (unknown = control:none, omit the field); when an

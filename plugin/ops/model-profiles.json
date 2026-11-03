@@ -1,73 +1,36 @@
 {
-  "_comment": "Model descriptions Jev chooses between (policy.models[*].good_at/weak_at/cost). Jev never sees names or numbers; these words are the whole basis of its pick. Sources: Artificial Analysis API per-task columns (hard reasoning, terminal/agentic, coding, long context, speed) at the effort each model really runs here, joined with OpenRouter price/window, plus warslop gates of 2026-10-20/21. Domain study questions (science, medicine, law) use Vals AI and AA domain benchmarks. Writing and Indonesian quality are not ranked (every model does them); small talk and summaries go to the free pool in the app. Cost words: OpenCode Go models are included in a flat subscription; OpenRouter models are pay per use.",
-  "ocgoa/opencode-go/deepseek-v4.1-flash": {
-    "good_at": "very fast answers, long documents and long conversations (the best long-context reasoning), everyday coding and tool use, solid reasoning; solid on science, medical and legal study questions",
-    "weak_at": "the toughest multi-step tool tasks, where the 1017 build and glm are stronger; legal research a step behind glm",
-    "cost": "included in the subscription"
+  "_comment": "What Jev reads about each paid option (policy.models[*].good_at/weak_at/cost/measured), jev-prompt-v2 (2026-11-03). Rules, checked by descriptionProblems in lib/jev.mjs and by test/profiles.test.mjs: no model names, no digits, no negations, no reference to another option; each option is described on its own. Source: Artificial Analysis at the variant matching the effort the router actually sends (deepseek-v4.1-flash at high; mimo-v2.6-pro in its only mode); the glm-5.3-flash, qwen3.8-flash and muse-spark rows exist only at max/xhigh, hence 'measured at its top setting'. Lead's readings: deepseek-v4.1-flash high intelligence 29, agentic coding 29%, SWE 17%, agentic work 68% (highest), fastest; mimo-v2.6-pro agentic coding 35% (highest real), SWE 24%, slow start (3.5 s, 44 tok/s), hallucinates on knowledge; glm-5.3-flash coding 33% at max, 75 tok/s; qwen3.8-flash coding 25%, hallucinates most (-12); muse-spark non-hallucination +26 (highest), coding 8%; gpt-6-luna high coding 5% (lowest; hidden from Jev, jev.hidden). Cost words from the Go list output price per 1M tokens (docs/NOTES-pricing-2026-10-26.md in warslop): up to $0.25 cheapest (muse 0.20), up to $0.65 standard (deepseek 0.60 off-peak, glm 0.50, qwen 0.47, luna 0.50), above that pricier (mimo 0.87). Revision 2 (after the first jev-eval run): muse was over-picked for quick facts, proofs, puzzles and long documents, so its good_at is narrowed to specialist knowledge and its weak_at names its slowness on every request; deepseek's good_at names quick everyday questions, maths and reasoning.",
+  "ocpaid/opencode-go/deepseek-v4.1-flash": {
+    "good_at": "quick answers at high speed, everyday questions, maths and reasoning, long documents and long conversations, multi-step agentic work with tools, everyday coding",
+    "weak_at": "deep software engineering on large codebases",
+    "cost": "standard"
   },
-  "ocgoa/opencode-go/qwen3.8-flash": {
-    "good_at": "coding (the best coding-index score among the cheap models) and science exam questions (top science-exam score), general tasks, reads images",
-    "weak_at": "formal proofs and long derivations, long multi-step tool tasks and the hardest reasoning; no measured strength on medical or legal questions; moderate speed",
-    "cost": "included in the subscription"
+  "ocpaid/opencode-go/mimo-v2.6-pro": {
+    "good_at": "agentic coding and software engineering: multi-step coding, debugging and repository work with tools; long documents",
+    "weak_at": "slow to start and slow to write; recalling facts from memory, where it tends to invent details",
+    "cost": "pricier"
   },
-  "ocgob/opencode-go/gpt-6-luna": {
-    "good_at": "a different vendor as a fallback when the others fail",
-    "weak_at": "tool use, hard reasoning, coding, legal research and scientific work (at the effort it runs here it is near the bottom on all of them); do not choose it for these",
-    "cost": "included in the subscription"
+  "ocpaid/opencode-go/glm-5.3-flash": {
+    "good_at": "coding and debugging, with quick output",
+    "weak_at": "specialist legal and medical knowledge",
+    "cost": "standard",
+    "measured": "measured at its top setting"
   },
-  "ocgob/opencode-go/glm-5.3-flash": {
-    "good_at": "coding, debugging, data work and long multi-step tool use (top tier on terminal-task and coding benchmarks); among the strongest cheap models for study questions in science, medicine and law (science-exam, medical-note and legal-research results); reads images; moderate speed",
-    "weak_at": "the fastest answers (it thinks before it answers)",
-    "cost": "included in the subscription"
+  "ocpaid/opencode-go/qwen3.8-flash": {
+    "good_at": "general tasks and everyday coding, reading images",
+    "weak_at": "factual accuracy, where it often invents facts; hard multi-step reasoning",
+    "cost": "standard",
+    "measured": "measured at its top setting"
   },
-  "ocgob/opencode-go/mimo-v2.6-flash": {
-    "good_at": "simple factual questions and light tasks; reads images; passable on basic science",
-    "weak_at": "coding, tool use, hard reasoning and legal research (clearly behind the others); slow to start",
-    "cost": "included in the subscription"
+  "ocpaid/opencode-go/muse-spark-1.3-contributor": {
+    "good_at": "specialist knowledge questions in law, medicine and science, where care matters above speed; it admits uncertainty readily",
+    "weak_at": "slow on every request, since it thinks before each answer; quick questions, puzzles and proofs, long documents, coding and tool tasks",
+    "cost": "cheapest",
+    "measured": "measured at its top setting"
   },
-  "openrouter/z-ai/glm-5.3-flash": {
-    "good_at": "coding, debugging, data work and long multi-step tool use (top tier on terminal-task and coding benchmarks); among the strongest cheap models for study questions in science, medicine and law (science-exam, medical-note and legal-research results); reads images; quick to start",
-    "weak_at": "the fastest answers (it thinks before it answers)",
-    "cost": "pay per use, very cheap"
-  },
-  "openrouter/anthropic/claude-haiku-5.5": {
-    "good_at": "a different vendor as a fallback when the others fail; with long thinking it is strong on legal research, medical notes and science analysis, but it runs quick here",
-    "weak_at": "tool use and hard reasoning at the effort it runs here (well below the deepseek and glm models)",
-    "cost": "pay per use, moderate"
-  },
-  "openrouter/openai/gpt-6-luna": {
-    "good_at": "a different vendor as a fallback when the others fail",
-    "weak_at": "tool use, hard reasoning, coding, legal research and scientific work at the effort it runs here; do not choose it for these",
-    "cost": "pay per use, moderate"
-  },
-  "ocpv/opencode-go/beam-free": {
-    "good_at": "small talk, greetings, short factual answers and summaries of short or medium text; the fastest to answer",
-    "weak_at": "tool use, code, hard reasoning, and legal or medical questions beyond the basics (low legal-research score)",
-    "cost": "free"
-  },
-  "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": {
-    "good_at": "following instructions exactly, summaries, short factual answers, science exam questions and simple code in clean Indonesian",
-    "weak_at": "hard reasoning, long tool tasks, code and especially legal research (a very low score); can be slow on long answers",
-    "cost": "free"
-  },
-  "openrouter/deepseek/deepseek-v4.1-flash-1017": {
-    "good_at": "the strongest all-rounder here: hard reasoning and maths, difficult coding, long multi-step tool and terminal tasks, long documents, and the best choice for hard science, medical and legal study questions (top hard-reasoning and scientific-coding scores, the best legal-research score among the cheap models); still fast; reads images",
-    "weak_at": "pay per use, so only when the included models are not enough",
-    "cost": "pay per use, cheap"
-  },
-  "openrouter/inclusionai/ling-3.1-flash": {
-    "good_at": "fast, cheap tool use and long documents (top-tier terminal-task and long-context results for its price), everyday coding and reasoning",
-    "weak_at": "hard reasoning; legal and medical questions (its family scores at the bottom on legal research and medical tests); does not read images; shorter memory (about a quarter of a million tokens)",
-    "cost": "pay per use, very cheap"
-  },
-  "ocgoa/opencode-go/muse-spark-1.3-contributor": {
-    "good_at": "strong on hard legal, medical and science study questions and difficult coding (it matches the best cheap models at its default thinking and beats them when it thinks longer); reads images and video",
-    "weak_at": "slow: it always thinks first (6 to 8 seconds before the first word, 40 to 50 seconds for a full hard answer); not for quick questions, small talk or simple tasks",
-    "cost": "included in the subscription"
-  },
-  "openrouter/meta/muse-spark-1.3-contributor": {
-    "good_at": "strong on hard legal, medical and science study questions and difficult coding (it matches the best cheap models at its default thinking and beats them when it thinks longer); reads images and video",
-    "weak_at": "slow: it always thinks first (6 to 8 seconds before the first word, 40 to 50 seconds for a full hard answer); not for quick questions, small talk or simple tasks",
-    "cost": "pay per use, very cheap"
+  "ocpaid/opencode-go/gpt-6-luna": {
+    "good_at": "short general answers",
+    "weak_at": "coding, tool use and hard reasoning",
+    "cost": "standard"
   }
 }
