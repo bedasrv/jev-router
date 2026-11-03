@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { ABSTRACT_LEVELS, thinkingPhrase } from "./thinking.mjs";
 import { normalizeUsage } from "./usage.mjs";
+import { headerValue, isApiSession } from "./sessions.mjs";
 
 // Jev (TypeSafe classifier) client: one batched `choice` question over a shortlist, priority failover
 // across sources, per-source cooldown, an overall deadline. Never throws: returns {ok:false,error}.
@@ -9,8 +11,8 @@ const windowClass = (ctx) => (ctx >= 700000 ? "huge context window" : ctx >= 300
 const words = (t) => String(t).replace(/[0-9]/g, "").replace(/\s+/g, " ").trim();
 
 // Fixed phrases, never numbers (Jev is weak on numerics). A model with `good_at` in the policy is
-// described as a structured option (what it is good at, where it is weak, what it costs); otherwise
-// the older one-line `traits` text is used.
+// described as a structured option (what it is good at, where it is weak, what it costs, at which thinking
+// setting it was measured); otherwise the older one-line `traits` text is used.
 export function describeCandidate(id, f, m) {
   const meta = typeof m === "string" ? { traits: m } : (m ?? {});
   const ctx = Number.isFinite(f?.context_length) ? f.context_length : 0;
@@ -19,43 +21,90 @@ export function describeCandidate(id, f, m) {
   const out = { good_at: words(meta.good_at) };
   if (meta.weak_at) out.weak_at = words(meta.weak_at);
   out.cost = words(meta.cost ?? "unknown cost");
+  if (meta.measured) out.measured = words(meta.measured);
   out.context = windowClass(ctx);
   out.thinking = thinking;
   return out;
 }
 
+// The description rules (jev-prompt-v2): Jev reads each option on its own, so a description names no model, holds
+// no digits, says what the model does rather than what it does not, and never points at another option; cost is one
+// relative word from the Go list prices. Returns the problems, [] when the description is clean.
+export const COST_WORDS = ["cheapest", "standard", "pricier", "free"];
+const NAMES = /\b(deepseek|glm|qwen|mimo|muse|luna|gpt|kimi|grok|claude|haiku|sonnet|opus|beam|minimax|ling|nemotron|longcat|iceman|gemini|llama|mistral|openai|anthropic|meta|xiaomi|zhipu|alibaba)\b/i;
+const NEGATION = /\b(not|no|never|none|nothing|without|cannot|avoid|lacks?|neither|nor|unable)\b|n't\b/i;
+const OTHERS = /\b(than|others?|another|best|worst|most|least|stronger|weaker|better|worse|faster|slower|cheaper|costlier|next|instead|rest|alternatives?|options?|step up)\b/i;
+export function descriptionProblems(meta, ids = []) {
+  const out = [];
+  const families = ids.map((id) => String(id).split("/").at(-1).split(/[-.]/)[0].replace(/[0-9]+$/, "").toLowerCase()).filter((x) => x.length > 2);
+  for (const field of ["good_at", "weak_at", "measured"]) {
+    const t = meta?.[field];
+    if (t === undefined) continue;
+    if (typeof t !== "string" || !t.trim()) { out.push(`${field}: empty`); continue; }
+    if (/[0-9]/.test(t)) out.push(`${field}: digits`);
+    const name = t.match(NAMES)?.[0] ?? families.find((f) => new RegExp(`\\b${f}`, "i").test(t));
+    if (name) out.push(`${field}: names a model (${name})`);
+    const neg = t.match(NEGATION)?.[0]; if (neg) out.push(`${field}: negation (${neg})`);
+    const oth = t.match(OTHERS)?.[0]; if (oth) out.push(`${field}: refers to other options (${oth})`);
+  }
+  if (!meta?.good_at) out.push("good_at: missing");
+  if (!COST_WORDS.includes(meta?.cost)) out.push(`cost: one of ${COST_WORDS.join("|")}`);
+  return out;
+}
+
 // The task text: the user message(s) after the last assistant message (clients such as opencode
 // append a synthetic trailing user message, so "the last user message" alone can be the wrong one).
-export function askText(body, max = 1200) {
+// A long ask keeps its head and its tail (where the actual question usually is, after pasted text).
+export function askText(body, head = 600, tail = 600) {
   const msgs = body?.messages ?? [];
   let i = msgs.length - 1;
   while (i >= 0 && msgs[i]?.role !== "assistant") i--;
   const txt = (m) => (typeof m?.content === "string" ? m.content : Array.isArray(m?.content) ? m.content.filter((p) => p?.type === "text").map((p) => p.text).join(" ") : "");
-  return msgs.slice(i + 1).filter((m) => m?.role === "user").map(txt).join("\n").slice(0, max);
+  const t = msgs.slice(i + 1).filter((m) => m?.role === "user").map(txt).join("\n");
+  return t.length <= head + tail ? t : `${t.slice(0, head)}\n...\n${t.slice(-tail)}`;
+}
+
+// Facts about the request that code knows, as named fields (no prose): who sent it, whether it brings its own
+// system prompt, how many tools. API calls of the app are stateless and carry the session id `v<voucher>`
+// (warslop API-12a), so jev.api_session_pattern tells them from the chat app's conversations.
+export function requestSource(headers, cfg) {
+  return isApiSession(headerValue(headers, cfg?.session_header ?? "x-opencode-session"), cfg) ? "API client" : "chat app";
+}
+export const toolsWord = (n) => (!n ? "none" : n <= 8 ? "few" : "many");
+const hasSystem = (body) => (body?.messages ?? []).some((m) => m?.role === "system" || m?.role === "developer");
+
+// The order the options are shown in, shuffled per call but the same for the same request id: Jev favours the
+// first option (TypeSafe, jev-1.13), so a fixed order would turn that bias into a fixed pick.
+export function shuffleFor(ids, seed) {
+  if (seed === undefined || seed === null || ids.length < 2) return [...ids];
+  let x = crypto.createHash("sha256").update(String(seed)).digest().readUInt32LE(0) || 1;
+  const rnd = () => { x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; return x / 4294967296; };
+  const out = [...ids];
+  for (let i = out.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [out[i], out[j]] = [out[j], out[i]]; }
+  return out;
 }
 
 const sizeWords = (tokens) => (tokens > 60000 ? "very long conversation or large attached text" : tokens > 8000 ? "long conversation" : tokens > 1500 ? "medium conversation" : "short conversation");
 
-// One Choice question. The options are the shortlist (ids c1..cn, never model names); the state is the
-// guest's request plus facts code knows (tools, images, size in words).
+// One Choice question. The options are the shortlist (ids c1..cn in a shuffled order, never model names); the
+// state is the request plus facts code knows, as named fields. There is no tie-break: when several options fit,
+// Jev's answer is spread, confidence is low, and code keeps the default (the configured head, or the conversation's
+// previous model).
 export const INSTRUCTIONS = {
-  question: "Which model should answer this request from a cafe guest?",
-  goal: "The answer must be complete and correct in one pass. Guests usually write Indonesian and expect fluent, natural Indonesian back.",
+  question: "Which model should answer this request?",
+  goal: "The answer must be complete and correct in one pass.",
   judge: [
     "how much reasoning, knowledge, writing quality or code the request really needs",
     "whether it needs tool use such as running code or working with files",
     "how much harm a wrong or sloppy answer would do",
   ],
-  ignore: "how long the guest wants the answer to be",
-  // c1 is the head of the configured order (the default). Measured 2026-10-30 on 103 logged paid asks: the older
-  // cost tie-break left 21% of answers confident (every paid option is "included in the subscription"), this one 50%.
-  tie_break: "If several options can fully do it, pick c1, the default; choose another only when its listed strength is what this request needs.",
+  ignore: "how long the answer is asked to be",
 };
 
 export const EFFORT_INSTRUCTIONS = {
   question: "How much thinking should the chosen model do for this request?",
   goal: "Pick the lowest tier that still lets the model complete the request correctly in one pass; normal is the provider default.",
-  ignore: "how long the guest wants the answer to be",
+  ignore: "how long the answer is asked to be",
   tie_break: "when unsure between two adjacent tiers, choose the lower one; frontier is rare",
 };
 
@@ -66,18 +115,28 @@ export const EFFORT_CRITERIA = {
   frontier: "the hardest work where the model should use its top thinking level; not for ordinary hard tasks",
 };
 
-export function buildPayload({ pool, ask, req, shown, facts, policy }) {
-  const ids = shown.map((_, n) => `c${n + 1}`);
-  const criteria = Object.fromEntries(shown.map((id, n) => [ids[n], describeCandidate(id, facts[id], policy.models?.[id])]));
+// `order` is the shortlist as shown (c1 = order[0]); `seed` (the request id) fixes the shuffle; `previous` is the
+// conversation's last decision {head, effort} on a new turn of an existing conversation: its option id and its
+// thinking tier, so Jev can weigh staying (the prompt cache) against switching through facts, not prose.
+export function buildPayload({ ask, req, shown, facts, policy, seed, previous = null, source = "chat app", body = null }) {
+  const order = shuffleFor(shown, seed);
+  const ids = order.map((_, n) => `c${n + 1}`);
+  const criteria = Object.fromEntries(order.map((id, n) => [ids[n], describeCandidate(id, facts[id], policy.models?.[id])]));
+  const prevAt = previous?.head ? order.indexOf(previous.head) : -1;
   return {
     ids,
+    order,
     effortChoices: [...ABSTRACT_LEVELS],
     state: {
       request: ask,
-      pool: pool === "paid" ? "premium (paid) guest" : "free guest",
-      needs_tools: req.usesTools ? "yes, the request comes with tools the model may call" : "no",
+      source,
+      system_prompt: (body ? hasSystem(body) : !!req.system) ? "present" : "absent",
+      tools: toolsWord(req.toolCount ?? (req.usesTools ? 1 : 0)),
       has_image: req.images > 0 ? "yes" : "no",
       size: sizeWords(req.tokens),
+      ...(previous ? { conversation: "follow-up turn" } : {}),
+      ...(prevAt >= 0 ? { previous_model: ids[prevAt] } : {}),
+      ...(previous?.effort ? { previous_tier: previous.effort } : {}),
     },
     questions: {
       model: { type: "choice", instructions: INSTRUCTIONS, criteria },

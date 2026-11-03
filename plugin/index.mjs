@@ -4,10 +4,10 @@ import { createPolicyLoader } from "./lib/policy.mjs";
 import { createFacts } from "./lib/facts.mjs";
 import { inspectRequest } from "./lib/eligibility.mjs";
 import { buildList, eligibleIds } from "./lib/builder.mjs";
-import { createJev, buildPayload, askText } from "./lib/jev.mjs";
+import { createJev, buildPayload, askText, requestSource } from "./lib/jev.mjs";
 import { applyThinkingToList, minFallbacks, toHostThinking } from "./lib/thinking.mjs";
 import { createHealth } from "./lib/health.mjs";
-import { conversationKey, isFresh, createSessions, hash } from "./lib/sessions.mjs";
+import { conversationKey, isFresh, createSessions, hash, headerValue, isApiSession } from "./lib/sessions.mjs";
 import { createLog } from "./lib/decision-log.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -28,31 +28,33 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
   function jevSkipped(cfg, headers) {
     const list = cfg?.skip_sessions;
     if (!Array.isArray(list) || !list.length) return false;
-    const name = (cfg.session_header ?? "x-opencode-session").toLowerCase();
-    const v = Object.entries(headers ?? {}).find(([k]) => k.toLowerCase() === name)?.[1];
-    return [v].flat().some((x) => typeof x === "string" && list.includes(x));
+    const v = headerValue(headers, cfg.session_header ?? "x-opencode-session");
+    return !!v && list.includes(v);
   }
 
   // Jev: shadow = ask in the background and only log; on = wait (<= deadline) and lead with a confident pick.
-  function jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead }) {
+  // jev.hidden: ids Jev is never shown (they stay in the order as fallback routes).
+  function jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead, previous }) {
     const cfg = policy.jev;
     if (!cfg || cfg.mode === "off" || !cfg.mode || !fresh) return null;
     const cap = cfg.max_shown?.[pool] ?? (pool === "paid" ? 12 : 8);
+    const hidden = new Set(cfg.hidden ?? []);
     const el = eligibleIds({ pool, policy, facts: f, req, health });
-    const shown = el.main.filter((id) => !el.cooling.includes(id)).slice(0, cap);
+    const shown = el.main.filter((id) => !el.cooling.includes(id) && !hidden.has(id)).slice(0, cap);
     if (shown.length < 2) return null;
-    const payload = buildPayload({ pool, ask: askText(body), req, shown, facts: f, policy });
+    const ask = askText(body);
+    const payload = buildPayload({ ask, req, shown, facts: f, policy, seed: ctx.requestId ?? ask, previous, source: requestSource(ctx.headers, cfg) });
     const p = jevClient.ask(cfg, payload).then((res) => {
-      const pick = res.ok ? shown[res.index] : null;
+      const pick = res.ok ? payload.order[res.index] : null;
       const thr = cfg.threshold ?? 0.5;
       // opt-in labelling aid: a short ask excerpt for turns where Jev disagrees with the static head
       if (cfg.sample_file && res.ok && pick !== staticHead) {
         createLog(path.resolve(path.dirname(policyFile), cfg.sample_file))({ id: ctx.requestId ?? null, pool, ask: payload.state.request.slice(0, cfg.sample_chars ?? 300), tools: req.usesTools,
-          static_head: staticHead, jev_pick: pick, confidence: Number(res.confidence.toFixed(3)), shown: shown.map((id, n) => ({ id, desc: payload.questions.model.criteria[payload.ids[n]] })) });
+          static_head: staticHead, jev_pick: pick, confidence: Number(res.confidence.toFixed(3)), shown: payload.order.map((id, n) => ({ id, desc: payload.questions.model.criteria[payload.ids[n]] })) });
       }
       const confident = res.ok && res.confidence >= thr;
       const outcome = !res.ok ? "unavailable" : !confident ? "unconfident" : cfg.mode === "on" ? "applied" : "shadow";
-      log({ event: "jev", id: ctx.requestId ?? null, mode: cfg.mode, pool, conv: hash(key), ok: res.ok, outcome, source: res.source, jev_model: res.model, served_model: res.served_model, requested_model: res.requested_model, latency_ms: res.latency_ms, usage: res.usage, shown,
+      log({ event: "jev", id: ctx.requestId ?? null, mode: cfg.mode, pool, conv: hash(key), ok: res.ok, outcome, source: res.source, jev_model: res.model, served_model: res.served_model, requested_model: res.requested_model, latency_ms: res.latency_ms, usage: res.usage, shown, order: payload.order, state: { source: payload.state.source, system_prompt: payload.state.system_prompt, tools: payload.state.tools, previous_model: payload.state.previous_model, previous_tier: payload.state.previous_tier },
         pick, effort: res.ok ? res.effort : undefined, effort_confidence: res.ok ? res.effort_confidence : undefined,
         confidence: res.ok ? Number(res.confidence.toFixed(3)) : undefined, probabilities: res.ok ? res.probabilities : undefined,
         static_head: staticHead, differs: res.ok ? pick !== staticHead : undefined, would_apply: res.ok ? res.confidence >= thr && pick !== staticHead : undefined,
@@ -71,23 +73,31 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     syncHealth(policy);
     const body = ctx.body ?? {};
     const req = inspectRequest(body);
-    const key = conversationKey(ctx.headers, body);
+    const key = conversationKey(ctx.headers, body, policy.jev);
     const fresh = isFresh(body);
-    const prev = fresh ? null : sessions.get(key, now());
+    const known = sessions.get(key, now());
+    // Stickiness: a continuation keeps the head; with Jev on, a new turn of an existing conversation also keeps the
+    // previous model and tier unless Jev is confident in a different one (switching model loses the prompt cache).
+    // Stateless API calls (session `v<voucher>`) have no new turns: each fresh call is decided on its own.
+    const api = isApiSession(headerValue(ctx.headers, policy.jev?.session_header ?? "x-opencode-session"), policy.jev);
+    const sticky = fresh && !!known && !api && policy.jev?.mode === "on";
+    const prev = fresh && !sticky ? null : known;
     const f = factsSrc.get(policy);
     let preferred = prev?.head ?? null;
     let { models, excluded, nofit, cooling } = buildList({ pool, policy, facts: f, req, preferred, health });
     let jevInfo;
     let desiredEffort = null, effortSource = null;
     const skipped = jevSkipped(policy.jev, ctx.headers);
-    const step = models.length && !skipped ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0] }) : null;
+    const step = models.length && !skipped ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0], previous: fresh && known && !api ? known : null }) : null;
     if (step?.mode === "on") {
       const out = await step.promise;
       if (out?.res.ok && out.res.confidence >= out.thr) {
         ({ models, excluded, nofit, cooling } = buildList({ pool, policy, facts: f, req, preferred: out.pick, health }));
         jevInfo = { applied: out.pick, confidence: Number(out.res.confidence.toFixed(3)), effort: out.res.effort };
-        // Effort is a paid-pool decision. Free still logs Jev's answer but never applies it.
-        if (pool === "paid") { desiredEffort = out.res.effort; effortSource = "jev"; }
+        // Effort is a paid-pool decision. Free still logs Jev's answer but never applies it. A sticky turn changes
+        // its tier only when Jev is confident about the tier too.
+        const effortSure = (out.res.effort_confidence ?? out.res.confidence) >= out.thr;
+        if (pool === "paid" && (!sticky || !prev?.effort || effortSure || out.res.effort === prev.effort)) { desiredEffort = out.res.effort; effortSource = "jev"; }
       }
     }
 
@@ -95,7 +105,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     // list keeps only models where the exact same control+value applies. Continuations reuse the
     // fresh task's need; a paid turn with no Jev answer falls back to normal (the provider default).
     if (pool === "paid" && policy.jev?.mode === "on") {
-      if (!desiredEffort && !fresh && prev?.effort) { desiredEffort = prev.effort; effortSource = "session"; }
+      if (!desiredEffort && (!fresh || sticky) && prev?.effort) { desiredEffort = prev.effort; effortSource = "session"; }
       if (!desiredEffort) { desiredEffort = "normal"; effortSource = "default"; }
     }
     let effortInfo = null;
@@ -122,14 +132,14 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     if (!models.length) return undefined;
     sessions.set(key, { head: models[0], effort: desiredEffort ?? null }, now());
     log({
-      event: "decision", id: ctx.requestId ?? null, pool, conv: hash(key), fresh, est_tokens: req.tokens, reserve: req.reserve,
+      event: "decision", id: ctx.requestId ?? null, pool, conv: hash(key), fresh, sticky: sticky || undefined, est_tokens: req.tokens, reserve: req.reserve,
       tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode, jev_skipped: skipped || undefined, effort: effortInfo, demoted: cooling?.length ? cooling : undefined,
     });
     // Response-header provenance (patch 0007): reason is jev | static[:cont]; confidence
     // only when Jev's pick was applied. The pool itself is already the request model.
     return {
       models,
-      reason: jevInfo ? "jev" : fresh ? "static" : "static:cont",
+      reason: jevInfo ? "jev" : !fresh ? "static:cont" : sticky ? "static:sticky" : "static",
       ...(jevInfo ? { confidence: jevInfo.confidence } : {}),
       // Applied native control as {control, value} (the 0008 wire shape; the log keeps `native`),
       // or an explicit none/clear when normal/free/no mapping wins.

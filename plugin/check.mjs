@@ -8,6 +8,7 @@ import { inspectRequest, usableWindow } from "./lib/eligibility.mjs";
 import { buildList } from "./lib/builder.mjs";
 import { missingThinking, thinkingFor } from "./lib/thinking.mjs";
 import { loadEffortData, measuredKey } from "./ops/apply-effort-policy.mjs";
+import { descriptionProblems } from "./lib/jev.mjs";
 
 const file = process.argv[2] ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "policy.json");
 const policy = createPolicyLoader(file, (r) => console.error(JSON.stringify(r)))();
@@ -37,4 +38,10 @@ const dead = [...policy.order.paid, ...policy.order.free, ...Object.values(polic
   return key && (table[key]?.dead || draft[key]?.skip);
 });
 if (dead.length) console.log("\nDEAD in effort data (remove with ops/apply-effort-policy.mjs):", [...new Set(dead)].join(", "));
+// What Jev reads: every paid option it is shown must follow the description rules (lib/jev.mjs descriptionProblems).
+const hiddenIds = new Set(policy.jev?.hidden ?? []);
+const shownPaid = policy.order.paid.filter((id) => !hiddenIds.has(id));
+const descBad = shownPaid.flatMap((id) => descriptionProblems(policy.models?.[id] ?? {}, shownPaid).map((e) => `${id}: ${e}`));
+if (hiddenIds.size) console.log("\nhidden from Jev (fallback routes only):", [...hiddenIds].join(", "));
+if (descBad.length) console.log("\nDESCRIPTIONS break the rules (ops/model-profiles.json, ops/apply-prompt-v2.mjs):\n  " + descBad.join("\n  "));
 process.exit(0);

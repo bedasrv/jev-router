@@ -174,9 +174,9 @@ export function toHostThinking(applied) {
 /** A no-number phrase for Jev's candidate descriptions, so hard turns can prefer a model that can think more. */
 export function thinkingPhrase(t) {
   const n = normalizeThinking(t);
-  if (n.control === "none") return "thinking level cannot be adjusted";
+  if (n.control === "none") return "fixed thinking level";
   if (n.control === "budget") return "thinking budget control is unverified";
-  if (n.control === "toggle") return "thinking can be turned off or on, not graded";
+  if (n.control === "toggle") return "thinking switches on or off";
   const values = n.values.map(String);
   if (values.some((v) => v === "high" || v === "xhigh" || v === "max")) return "can think harder for difficult tasks";
   if (values.includes("medium")) return "can think a little harder for difficult tasks";
