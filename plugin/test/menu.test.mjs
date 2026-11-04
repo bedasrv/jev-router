@@ -464,3 +464,11 @@ test("UP-10c item 13: when every attempt is limit-spent they are all kept, so th
   const { attempts } = attemptsFor(f3, { menu: MENU, facts, req: inspectRequest({ messages: [{ role: "user", content: "x" }] }), health: h });
   assert.deepEqual(attempts.map((a) => a.model), [BEAM]);
 });
+
+test("UP-10c: a session that carries both pools keeps each pool's own last item (the canary shape)", async () => {
+  const { r, jev, logs } = mk();
+  jev.answer("P4"); await r.onRoute(turn("paid", "x", { conv: "both" }));
+  jev.answer("F3"); const f = await r.onRoute(turn("free", "x", { conv: "both", history: followUp(1) }));
+  assert.equal(f.item, "F3");
+  assert.equal(logs().at(-1).sticky, "new");
+});

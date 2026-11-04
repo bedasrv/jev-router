@@ -83,7 +83,9 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     const ok = new Set(items.map((i) => i.id));
     const def = itemById(menu, menu.defaults?.[pool]);
     const fallback = def && ok.has(def.id) ? def : items[0];
-    const last = known?.item ? itemById(menu, known.item) : null;
+    // The last item counts only in its own pool: one session id can carry both pools (the app's canary does).
+    const prevItem = known?.item ? itemById(menu, known.item) : null;
+    const last = prevItem?.pool === pool ? prevItem : null;
     const cfg = policy.jev ?? {};
     const thr = menu.threshold ?? cfg.threshold ?? 0.85;
     let choice, jevInfo, pick = null;
