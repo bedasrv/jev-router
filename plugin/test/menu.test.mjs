@@ -129,15 +129,19 @@ test("UP-10c: per attempt thinking: a backup keeps its own value and never force
   const { r, jev } = mk();
   jev.answer("P1");
   const out = await r.onRoute(turn("paid", "halo", { conv: "pa" }));
-  // P1 = deepseek low; its backup P2 is the same target (kept once, the head's pair wins); the floor fills glm (P6)
-  assert.deepEqual(out.models, [DS, GLM]);
-  assert.deepEqual(out.thinking_by_model, { [DS]: { control: "effort", value: "low" }, [GLM]: { control: "none" } });
-  // a host without patch 0010 gets no shared value when attempts differ (it would send low to glm)
-  assert.deepEqual(out.thinking, { control: "none" });
+  // P1 = deepseek low; its same-role Go backup is muse at low (P2 is the same target as the head, kept once)
+  assert.deepEqual(out.models, [DS, MUSE]);
+  assert.deepEqual(out.thinking_by_model, { [DS]: { control: "effort", value: "low" }, [MUSE]: { control: "effort", value: "low" } });
+  assert.deepEqual(out.thinking, { control: "effort", value: "low" }); // every attempt shares it: an old host may apply it
   jev.answer("P3");
   const p3 = await r.onRoute(turn("paid", "pasal berapa", { conv: "pb" }));
   assert.deepEqual(p3.models, [MUSE, DS]);
-  assert.deepEqual(p3.thinking_by_model, { [MUSE]: { control: "effort", value: "high" }, [DS]: { control: "none" } });
+  assert.deepEqual(p3.thinking_by_model, { [MUSE]: { control: "effort", value: "high" }, [DS]: { control: "effort", value: "high" } });
+  jev.answer("P4");
+  const p4 = await r.onRoute(turn("paid", "buktikan", { conv: "pc" }));
+  assert.deepEqual(p4.thinking_by_model, { [DS]: { control: "effort", value: "max" }, [MUSE]: { control: "effort", value: "high" } });
+  // a host without patch 0010 gets no shared value when attempts differ (it would send max to muse)
+  assert.deepEqual(p4.thinking, { control: "none" });
 });
 
 test("UP-10c: the floor keeps at least two attempts while more are eligible; the free pool has one model and says short", async () => {
@@ -153,14 +157,15 @@ test("UP-10c: the floor keeps at least two attempts while more are eligible; the
   assert.equal(logs().filter((l) => l.event === "decision").at(-1).short, true);
 });
 
-test("UP-10c: a backup on another provider for the same model goes first, with the same thinking; unlisted targets are skipped", () => {
+test("UP-10c: a backup on another of our Go accounts for the same model goes first, with the same thinking; unlisted targets are skipped", () => {
   const menu = structuredClone(MENU);
-  const ALT = "orx/deepseek/deepseek-v4.1-flash";
-  menu.items[0].backups = [{ model: ALT, thinking: { control: "effort", value: "low" } }, { model: "gone/x", thinking: null }, { item: "P2" }];
-  const f = { ...facts, [ALT]: { context_length: 1000000, tools: true, vision: true }, "gone/x": { unlisted: true } };
+  menu.allowed_prefixes = ["ocpaid", "ocpaid2"]; // a separately registered Go connection
+  const ALT = "ocpaid2/opencode-go/deepseek-v4.1-flash";
+  menu.items[0].backups = [{ model: ALT, thinking: { control: "effort", value: "low" } }, { model: "ocpaid2/opencode-go/gone", thinking: null }, { item: "P2" }];
+  const f = { ...facts, [ALT]: { context_length: 1000000, tools: true, vision: true }, "ocpaid2/opencode-go/gone": { unlisted: true } };
   const { attempts, skipped } = attemptsFor(menu.items[0], { menu, facts: f, req: inspectRequest({ messages: [{ role: "user", content: "x" }] }) });
   assert.deepEqual(attempts.map((a) => [a.model, a.thinking?.value ?? "default"]), [[DS, "low"], [ALT, "low"]]);
-  assert.deepEqual(skipped, [{ model: "gone/x", reason: "not_listed", from: "backup" }]);
+  assert.deepEqual(skipped, [{ model: "ocpaid2/opencode-go/gone", reason: "not_listed", from: "backup" }]);
 });
 
 test("UP-10c sticky: a continuation is locked to the turn's item without asking Jev", async () => {
@@ -178,8 +183,9 @@ test("UP-10c sticky: a continuation is locked to the turn's item without asking 
   assert.equal(logs().at(-1).sticky, "continuation");
 });
 
-test("UP-10c sticky: a heavier task switches at once; a simpler one only after two turns in a row; effort moves freely within a model", async () => {
-  const { r, jev, logs } = mk();
+test("UP-10c sticky: a heavier task switches at once; a simpler one only after two turns in a row; effort moves freely within a model when effort_change_is_switch is false", async () => {
+  const free = structuredClone(MENU); free.sticky.effort_change_is_switch = false;
+  const { r, jev, logs } = mk(policy(free));
   const conv = "st";
   const at = (n) => ({ conv, history: followUp(n) });
   jev.answer("P2"); assert.equal((await r.onRoute(turn("paid", "a", { conv }))).item, "P2");
@@ -311,7 +317,7 @@ test("UP-10c: the result log names the item, the attempt that answered and wheth
   assert.equal(res.item, "P3");
   assert.equal(res.answered_by, DS);
   assert.equal(res.backup_used, true);
-  assert.equal(res.thinking, "default");
+  assert.equal(res.thinking, "high"); // the answering backup's own value (deepseek high, P3's same-role Go backup)
 });
 
 test("UP-10c: without policy.menu the router keeps the old model + effort behaviour", async () => {
@@ -451,7 +457,7 @@ test("UP-10c item 13: the item stays, its spent head model is skipped, and the b
   assert.equal(out.item, "P3");
   assert.ok(!out.models.includes(MUSE));
   assert.equal(out.models[0], DS);
-  assert.deepEqual(out.thinking_by_model[DS], { control: "none" }, "the backup keeps its own value");
+  assert.deepEqual(out.thinking_by_model[DS], { control: "effort", value: "high" }, "the backup keeps its own value");
   const d = logs().filter((l) => l.event === "decision").at(-1);
   assert.ok(d.skipped.some((s) => s.model === MUSE && s.reason === "usage_limit"));
   assert.ok(logs().some((l) => l.event === "usage_limit" && l.model === MUSE));
@@ -471,4 +477,27 @@ test("UP-10c: a session that carries both pools keeps each pool's own last item 
   jev.answer("F3"); const f = await r.onRoute(turn("free", "x", { conv: "both", history: followUp(1) }));
   assert.equal(f.item, "F3");
   assert.equal(logs().at(-1).sticky, "new");
+});
+
+test("UP-10c sticky (menu data): an effort change waits like a model switch, because it breaks the prompt cache (effort-pairs-research)", async () => {
+  assert.equal(MENU.sticky.effort_change_is_switch, true);
+  const { r, jev, logs } = mk();
+  const conv = "ecs";
+  jev.answer("P4"); await r.onRoute(turn("paid", "a", { conv }));
+  jev.answer("P1"); assert.equal((await r.onRoute(turn("paid", "b", { conv, history: followUp(1) }))).item, "P4");
+  assert.equal(logs().at(-1).sticky, "simpler_wait");
+  jev.answer("P1"); assert.equal((await r.onRoute(turn("paid", "c", { conv, history: followUp(2) }))).item, "P1");
+  jev.answer("P4"); assert.equal((await r.onRoute(turn("paid", "d", { conv, history: followUp(3) }))).item, "P4"); // heavier: at once
+});
+
+test("UP-10c Addendum 3: OpenCode Go only: an item or backup outside menu.allowed_prefixes is refused", () => {
+  assert.deepEqual(MENU.allowed_prefixes, ["ocpaid"]);
+  for (const it of MENU.items) {
+    assert.ok(it.model.startsWith("ocpaid/opencode-go/"), it.id);
+    for (const b of it.backups ?? []) if (b.model) assert.ok(b.model.startsWith("ocpaid/opencode-go/"), `${it.id} backup ${b.model}`);
+  }
+  const bad = (mut, re) => { const p = policy(); mut(p.menu); assert.throws(() => validate(p), re); };
+  bad((m) => { m.items[0].backups = [{ model: "openrouter/deepseek/deepseek-v4.1-flash", thinking: null }]; }, /outside menu.allowed_prefixes/);
+  bad((m) => { m.items.find((i) => i.id === "S1").model = "deepseekapi/deepseek-chat"; }, /outside menu.allowed_prefixes/);
+  bad((m) => { m.allowed_prefixes = []; }, /allowed_prefixes must list/);
 });

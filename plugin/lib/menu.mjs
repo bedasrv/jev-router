@@ -21,6 +21,10 @@
 // menu.metering is a policy edit, never a code change.
 // item.thinking is the model's NATIVE value: null = the provider default (no field), {control:"effort", value:"low"},
 // {control:"toggle", value:"on"|"off"}. backups: [{model, thinking} | {item: "P2"}], tried in order after the head.
+// Owner decision 2026-11-04 (Addendum 3): OpenCode Go only. menu.allowed_prefixes (e.g. ["ocpaid"]) lists the
+// connections an item or backup may use; anything else is refused when the policy loads. Backups per item: the same
+// pair on another of our Go accounts (the ocpaid proxy rotates our accounts inside one attempt; a separately
+// registered Go connection would be listed here), then a same-role Go model (Go limits are per model), then P2.
 import { eligible } from "./eligibility.mjs";
 
 export const MENU_POOLS = ["paid", "free"];
@@ -78,6 +82,15 @@ export function validateMenu(menu) {
       if (b?.item !== undefined) { if (typeof b.item !== "string") throw new Error(`${at}.backups[${k}].item must be an item id`); continue; }
       if (typeof b?.model !== "string" || !b.model.includes("/")) throw new Error(`${at}.backups[${k}] must be {model, thinking} or {item}`);
       const bp = thinkingProblem(b.thinking); if (bp) throw new Error(`${at}.backups[${k}].${bp}`);
+    }
+  }
+  const allowed = menu.allowed_prefixes;
+  if (allowed !== undefined) {
+    if (!Array.isArray(allowed) || !allowed.length || !allowed.every((x) => typeof x === "string" && x && !x.includes("/"))) throw new Error("menu.allowed_prefixes must list connection prefixes");
+    const ok = (id) => allowed.includes(String(id).split("/")[0]);
+    for (const it of menu.items) {
+      if (!ok(it.model)) throw new Error(`menu item ${it.id}: ${it.model} is outside menu.allowed_prefixes (OpenCode Go only)`);
+      for (const b of it.backups ?? []) if (b.model && !ok(b.model)) throw new Error(`menu item ${it.id}: backup ${b.model} is outside menu.allowed_prefixes (OpenCode Go only)`);
     }
   }
   const byId = new Map(menu.items.map((i) => [i.id, i]));
