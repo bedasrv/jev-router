@@ -10,8 +10,15 @@
 //   cost_basis?: { in, cached, out },       // the guest's charge basis per 1M tokens (UP-2c), for max_cost_ratio items
 //   output_tokens?: 600,                    // the output a turn is assumed to produce when the ratio is computed
 //   floor_fill?: { paid: [itemId...], free: [...] },   // items whose pairs top a too-short attempt list up
-//   items: [{ id, pool, label, model, thinking, description, rank, prices?, eligibility?, backups? }]
+//   metering?: false,                       // true once warslop meters each pack per model (pack-metering-per-model)
+//   kinds?: { general: "...", big_coding: "...", ... },  // task kinds Jev rates when a specialist is on offer
+//   items: [{ id, pool, label, model, thinking, description, rank, prices?, eligibility?, backups?,
+//             specialist?, kinds?, requires_metering? }]
 // }
+// Addendum (owner 2026-11-04): a specialist item (specialist: true) has kinds: [...] from menu.kinds; Jev may pick it only
+// when confident about the item AND confident that the turn is one of its kinds. requires_metering: true keeps an item
+// off until menu.metering is true; eligibility.until_metering: true drops its cost-ratio cutoff at that point. Flipping
+// menu.metering is a policy edit, never a code change.
 // item.thinking is the model's NATIVE value: null = the provider default (no field), {control:"effort", value:"low"},
 // {control:"toggle", value:"on"|"off"}. backups: [{model, thinking} | {item: "P2"}], tried in order after the head.
 import { eligible } from "./eligibility.mjs";
@@ -61,6 +68,12 @@ export function validateMenu(menu) {
     if (mr !== undefined && !(Number.isFinite(mr) && mr > 0)) throw new Error(`${at}.eligibility.max_cost_ratio must be a positive number`);
     if (mr !== undefined && !it.prices) throw new Error(`${at}.eligibility.max_cost_ratio needs ${at}.prices`);
     if (it.backups !== undefined && !Array.isArray(it.backups)) throw new Error(`${at}.backups must be an array`);
+    if (it.specialist !== undefined && typeof it.specialist !== "boolean") throw new Error(`${at}.specialist must be true or false`);
+    if (it.requires_metering !== undefined && typeof it.requires_metering !== "boolean") throw new Error(`${at}.requires_metering must be true or false`);
+    if (it.specialist) {
+      if (!Array.isArray(it.kinds) || !it.kinds.length) throw new Error(`${at}.kinds must list the task kinds this specialist is for`);
+      for (const k of it.kinds) if (!Object.hasOwn(menu.kinds ?? {}, k)) throw new Error(`${at}.kinds: ${k} is not in menu.kinds`);
+    }
     for (const [k, b] of (it.backups ?? []).entries()) {
       if (b?.item !== undefined) { if (typeof b.item !== "string") throw new Error(`${at}.backups[${k}].item must be an item id`); continue; }
       if (typeof b?.model !== "string" || !b.model.includes("/")) throw new Error(`${at}.backups[${k}] must be {model, thinking} or {item}`);
@@ -80,6 +93,12 @@ export function validateMenu(menu) {
   }
   if (menu.cost_basis !== undefined) { const pp = priceProblem(menu.cost_basis, "menu.cost_basis"); if (pp) throw new Error(pp); }
   if (menu.items.some((i) => i.eligibility?.max_cost_ratio !== undefined) && !menu.cost_basis) throw new Error("menu.cost_basis is required when an item has max_cost_ratio");
+  if (menu.metering !== undefined && typeof menu.metering !== "boolean") throw new Error("menu.metering must be true or false");
+  if (menu.kinds !== undefined) {
+    if (!menu.kinds || typeof menu.kinds !== "object" || Array.isArray(menu.kinds)) throw new Error("menu.kinds must map a kind id to its description");
+    for (const [k, v] of Object.entries(menu.kinds)) if (!ID.test(k.replace(/_/g, "-")) || typeof v !== "string" || !v.trim()) throw new Error(`menu.kinds.${k} must be a short id with a description`);
+    if (Object.keys(menu.kinds).length < 2) throw new Error("menu.kinds needs at least two kinds (one of them for ordinary turns)");
+  }
   const th = menu.threshold;
   if (th !== undefined && !(Number.isFinite(th) && th >= 0 && th <= 1)) throw new Error("menu.threshold must be 0..1");
   const ma = menu.min_attempts;
@@ -154,12 +173,15 @@ export function cachedShareCutoff(prices, basis, max, { input, output }) {
 /** Can this item answer this request? Images need a vision route, tools a tool route, the text must fit, and an item
  * with max_cost_ratio must stay at or under it for this conversation's cached share. */
 export function itemEligible(item, { facts, req, body, menu, health = null }) {
+  if (item.requires_metering && menu.metering !== true) return { ok: false, reason: "requires_metering" };
   const f = facts?.[item.model];
   const r = eligible(f, req);
   if (!r.ok) return r;
   if (health?.isCooling?.(item.model)) return { ok: false, reason: "cooling" };
   const max = item.eligibility?.max_cost_ratio;
-  if (max !== undefined) {
+  // until_metering: once each pack is metered per model, the pack's budget carries a costlier turn (addendum item 10).
+  const capped = max !== undefined && !(item.eligibility?.until_metering && menu.metering === true);
+  if (capped) {
     const share = cachedShare(body);
     const ratio = costRatio(item.prices, menu.cost_basis, { input: req.tokens, share, output: menu.output_tokens ?? DEFAULT_OUTPUT_TOKENS });
     if (ratio > max) return { ok: false, reason: "cost_ratio", ratio: Math.round(ratio * 1000) / 1000, share: Math.round(share * 1000) / 1000 };
@@ -233,6 +255,20 @@ export function stickyChoice({ last, pick, ok, fallback, streak = 0, cfg = DEFAU
   const n = streak + 1;
   if (n >= cfg.downgrade_after) return { item: pick, source: "jev", reason: "simpler_confirmed", streak: 0 };
   return { item: last, source: "session", reason: "simpler_wait", streak: n };
+}
+
+/** The cost ratio of one turn on this item (null without prices): logged so the owner can see each pair against 1.00x. */
+export function turnCostRatio(item, { menu, req, body }) {
+  if (!item.prices || !menu.cost_basis) return null;
+  const r = costRatio(item.prices, menu.cost_basis, { input: req.tokens, share: cachedShare(body), output: menu.output_tokens ?? DEFAULT_OUTPUT_TOKENS });
+  return Math.round(r * 1000) / 1000;
+}
+
+/** Ids of the specialists among `items`, and whether a kind answer lets `pick` stand (addendum item 9). */
+export const specialistsIn = (items) => items.filter((i) => i.specialist);
+export function kindAllows(pick, kind, kindConfident) {
+  if (!pick?.specialist) return true;
+  return !!kindConfident && (pick.kinds ?? []).includes(kind);
 }
 
 /** OmniRoute's wire shape (patches 0008/0010): {control:"effort"|"toggle", value} or {control:"none"}. */

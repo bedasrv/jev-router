@@ -1,50 +1,318 @@
 {
- "_comment": "UP-10c menu (owner go 2026-11-04). One item = one (model + native thinking) pair Jev may pick. thinking: null = provider default (no field), else {control: effort|toggle, value}. Native values are policy data from effort-pairs-research (audit-code); the ones here are the 2026-10-22 measured levels until that lands. rank: higher = heavier/costlier (stickiness only switches DOWN after sticky.downgrade_after turns Jev rates simpler). backups: tried in order after the head, each with its own thinking; same model on another account/provider goes first once one is registered, then P2. gpt-6-luna is not on the menu (owner OK 2026-11-04).",
+ "_comment": "UP-10c menu (owner go 2026-11-04). One item = one (model + native thinking) pair Jev may pick. thinking: null = provider default (no field), else {control: effort|toggle, value}. Native values are policy data from effort-pairs-research (audit-code); the ones here are the 2026-10-22 measured levels until that lands. rank: higher = heavier/costlier (stickiness only switches DOWN after sticky.downgrade_after turns Jev rates simpler). backups: tried in order after the head, each with its own thinking; same model on another account/provider goes first once one is registered, then P2. gpt-6-luna is not on the menu (owner OK 2026-11-04). Specialists (S*, addendum 2026-11-04) carry requires_metering: true and stay off until menu.metering is true (warslop's pack-metering-per-model); P6's cost cutoff has until_metering: true and stops applying then. A specialist is picked only when Jev is confident about it AND about the task kind (menu.kinds), which must be one of its kinds. S2 (muse-wonder) is left out: it is on OpenRouter only (USD 4 in / 20 out per 1M) and the routers have no OpenRouter connection, so it cannot be dispatched. Specialist thinking is the provider default until effort-pairs-research measures them. S5 passes 1.00x already: set its requires_metering to false once the research confirms its quality.",
  "threshold": 0.85,
- "defaults": { "paid": "P2", "free": "F2" },
+ "defaults": {
+  "paid": "P2",
+  "free": "F2"
+ },
  "min_attempts": 2,
- "sticky": { "downgrade_after": 2, "effort_change_is_switch": false },
- "cost_basis": { "in": 0.30, "cached": 0.006, "out": 1.20 },
+ "sticky": {
+  "downgrade_after": 2,
+  "effort_change_is_switch": false
+ },
+ "metering": false,
+ "cost_basis": {
+  "in": 0.3,
+  "cached": 0.006,
+  "out": 1.2
+ },
  "output_tokens": 600,
- "floor_fill": { "paid": ["P2", "P6", "P3"], "free": ["F2"] },
+ "floor_fill": {
+  "paid": [
+   "P2",
+   "P6",
+   "P3"
+  ],
+  "free": [
+   "F2"
+  ]
+ },
+ "kinds": {
+  "general": "an ordinary request: conversation, a question, an explanation, short writing or everyday code",
+  "expert_reasoning": "expert level reasoning on a hard question that needs deep knowledge and careful judgement",
+  "business": "business work: strategy, finance, reports, plans and decisions for a company",
+  "vision": "a request about an image, photo, screenshot or scanned document",
+  "big_coding": "a large coding job: a whole application, many files, a big refactor or a long build",
+  "long_documents": "reading, comparing or summarising very long documents or many files at once",
+  "cybersecurity": "computer security: vulnerabilities, attacks, defence, logs and incident analysis",
+  "automation": "automating work through web services and APIs: connecting apps, webhooks, integrations and workflows",
+  "data_analysis": "analysing data: tables, statistics, trends and charts from a dataset"
+ },
  "items": [
-  { "id": "P1", "pool": "paid", "label": "Quick", "rank": 1,
-    "model": "ocpaid/opencode-go/deepseek-v4.1-flash", "thinking": { "control": "effort", "value": "low" },
-    "description": "quick answers with very little thinking: greetings, small talk, a single fact, a short rewrite or translation",
-    "backups": [{ "item": "P2" }] },
-  { "id": "P2", "pool": "paid", "label": "Everyday", "rank": 2,
-    "model": "ocpaid/opencode-go/deepseek-v4.1-flash", "thinking": null,
-    "description": "everyday requests with normal thinking: ordinary questions, explanations, writing and summaries in Indonesian or English, standard code",
-    "backups": [] },
-  { "id": "P3", "pool": "paid", "label": "Careful expert", "rank": 4,
-    "model": "ocpaid/opencode-go/muse-spark-1.3-contributor", "thinking": { "control": "effort", "value": "high" },
-    "description": "careful expert answers for law, health, science, history, programming, web pages and charts; says plainly when it is unsure; takes more time",
-    "backups": [{ "item": "P2" }] },
-  { "id": "P4", "pool": "paid", "label": "Deep reasoning", "rank": 4,
-    "model": "ocpaid/opencode-go/deepseek-v4.1-flash", "thinking": { "control": "effort", "value": "max" },
-    "description": "hard multi-step reasoning: maths, proofs, puzzles, difficult debugging and careful planning; thinks for a long time before answering",
-    "backups": [{ "item": "P2" }] },
-  { "id": "P5", "pool": "paid", "label": "Agent and tools", "rank": 3,
-    "model": "ocpaid/opencode-go/mimo-v2.6-flash", "thinking": null,
-    "description": "multi-step work with tools: running code, reading and writing files, building or changing a project over many steps",
-    "backups": [{ "item": "P2" }] },
-  { "id": "P6", "pool": "paid", "label": "Business and IT", "rank": 2,
-    "model": "ocpaid/opencode-go/glm-5.3-flash", "thinking": null,
-    "description": "business and IT work: spreadsheets, office documents, business emails, system administration, networks and IT support",
-    "prices": { "in": 0.15, "cached": 0.03, "out": 0.50 },
-    "eligibility": { "max_cost_ratio": 1.0 },
-    "backups": [{ "item": "P2" }] },
-  { "id": "F1", "pool": "free", "label": "Quick", "rank": 1,
-    "model": "ocpaid/opencode-go/beam-free", "thinking": { "control": "effort", "value": "low" },
-    "description": "quick answers with very little thinking: greetings, small talk, a single fact, a short rewrite or translation",
-    "backups": [{ "item": "F2" }] },
-  { "id": "F2", "pool": "free", "label": "Normal", "rank": 2,
-    "model": "ocpaid/opencode-go/beam-free", "thinking": null,
-    "description": "everyday requests with normal thinking: ordinary questions, explanations, writing, summaries and standard code",
-    "backups": [] },
-  { "id": "F3", "pool": "free", "label": "Think harder", "rank": 3,
-    "model": "ocpaid/opencode-go/beam-free", "thinking": { "control": "effort", "value": "high" },
-    "description": "requests that need careful step by step reasoning: maths, logic, tricky code, planning; thinks longer before answering",
-    "backups": [{ "item": "F2" }] }
+  {
+   "id": "P1",
+   "pool": "paid",
+   "label": "Quick",
+   "rank": 1,
+   "model": "ocpaid/opencode-go/deepseek-v4.1-flash",
+   "thinking": {
+    "control": "effort",
+    "value": "low"
+   },
+   "description": "quick answers with very little thinking: greetings, small talk, a single fact, a short rewrite or translation",
+   "backups": [
+    {
+     "item": "P2"
+    }
+   ]
+  },
+  {
+   "id": "P2",
+   "pool": "paid",
+   "label": "Everyday",
+   "rank": 2,
+   "model": "ocpaid/opencode-go/deepseek-v4.1-flash",
+   "thinking": null,
+   "description": "everyday requests with normal thinking: ordinary questions, explanations, writing and summaries in Indonesian or English, standard code",
+   "backups": []
+  },
+  {
+   "id": "P3",
+   "pool": "paid",
+   "label": "Careful expert",
+   "rank": 4,
+   "model": "ocpaid/opencode-go/muse-spark-1.3-contributor",
+   "thinking": {
+    "control": "effort",
+    "value": "high"
+   },
+   "description": "careful expert answers for law, health, science, history, programming, web pages and charts; says plainly when it is unsure; takes more time",
+   "backups": [
+    {
+     "item": "P2"
+    }
+   ]
+  },
+  {
+   "id": "P4",
+   "pool": "paid",
+   "label": "Deep reasoning",
+   "rank": 4,
+   "model": "ocpaid/opencode-go/deepseek-v4.1-flash",
+   "thinking": {
+    "control": "effort",
+    "value": "max"
+   },
+   "description": "hard multi-step reasoning: maths, proofs, puzzles, difficult debugging and careful planning; thinks for a long time before answering",
+   "backups": [
+    {
+     "item": "P2"
+    }
+   ]
+  },
+  {
+   "id": "P5",
+   "pool": "paid",
+   "label": "Agent and tools",
+   "rank": 3,
+   "model": "ocpaid/opencode-go/mimo-v2.6-flash",
+   "thinking": null,
+   "description": "multi-step work with tools: running code, reading and writing files, building or changing a project over many steps",
+   "backups": [
+    {
+     "item": "P2"
+    }
+   ]
+  },
+  {
+   "id": "P6",
+   "pool": "paid",
+   "label": "Business and IT",
+   "rank": 2,
+   "model": "ocpaid/opencode-go/glm-5.3-flash",
+   "thinking": null,
+   "description": "business and IT work: spreadsheets, office documents, business emails, system administration, networks and IT support",
+   "prices": {
+    "in": 0.15,
+    "cached": 0.03,
+    "out": 0.5
+   },
+   "eligibility": {
+    "max_cost_ratio": 1.0,
+    "until_metering": true
+   },
+   "backups": [
+    {
+     "item": "P2"
+    }
+   ]
+  },
+  {
+   "id": "S1",
+   "pool": "paid",
+   "label": "Expert reasoning",
+   "rank": 7,
+   "specialist": true,
+   "requires_metering": true,
+   "kinds": [
+    "expert_reasoning",
+    "business",
+    "vision"
+   ],
+   "model": "ocpaid/opencode-go/kimi-k3.1-pro",
+   "thinking": null,
+   "description": "expert reasoning on hard questions, business analysis and decisions, and detailed reading of images and documents",
+   "prices": {
+    "in": 2.0,
+    "cached": 0.2,
+    "out": 10.0
+   },
+   "backups": [
+    {
+     "item": "P3"
+    },
+    {
+     "item": "P2"
+    }
+   ]
+  },
+  {
+   "id": "S3",
+   "pool": "paid",
+   "label": "Big coding jobs",
+   "rank": 6,
+   "specialist": true,
+   "requires_metering": true,
+   "kinds": [
+    "big_coding"
+   ],
+   "model": "ocpaid/opencode-go/glm-5.3",
+   "thinking": null,
+   "description": "large coding jobs: building a whole application, changing many files, a big refactor or a long build",
+   "prices": {
+    "in": 1.4,
+    "cached": 0.26,
+    "out": 4.4
+   },
+   "backups": [
+    {
+     "item": "P5"
+    },
+    {
+     "item": "P2"
+    }
+   ]
+  },
+  {
+   "id": "S4",
+   "pool": "paid",
+   "label": "Long documents",
+   "rank": 5,
+   "specialist": true,
+   "requires_metering": true,
+   "kinds": [
+    "long_documents",
+    "cybersecurity"
+   ],
+   "model": "ocpaid/opencode-go/mimo-v2.6-pro",
+   "thinking": null,
+   "description": "very long documents and many files at once, and computer security work such as vulnerabilities, logs and incidents",
+   "prices": {
+    "in": 0.435,
+    "cached": 0.003625,
+    "out": 0.87
+   },
+   "backups": [
+    {
+     "item": "P2"
+    }
+   ]
+  },
+  {
+   "id": "S5",
+   "pool": "paid",
+   "label": "Automation",
+   "rank": 3,
+   "specialist": true,
+   "requires_metering": true,
+   "kinds": [
+    "automation"
+   ],
+   "model": "ocpaid/opencode-go/minimax-m3.1-flash",
+   "thinking": null,
+   "description": "automating work through web services and APIs: connecting apps, webhooks, integrations and step by step workflows",
+   "prices": {
+    "in": 0.15,
+    "cached": 0.015,
+    "out": 0.6
+   },
+   "backups": [
+    {
+     "item": "P5"
+    },
+    {
+     "item": "P2"
+    }
+   ]
+  },
+  {
+   "id": "S6",
+   "pool": "paid",
+   "label": "Data analysis",
+   "rank": 4,
+   "specialist": true,
+   "requires_metering": true,
+   "kinds": [
+    "data_analysis",
+    "cybersecurity"
+   ],
+   "model": "ocpaid/opencode-go/gpt-6-luna",
+   "thinking": null,
+   "description": "data analysis: tables, statistics, trends and charts from a dataset, and computer security questions",
+   "prices": {
+    "in": 0.1,
+    "cached": 0.01,
+    "out": 0.5
+   },
+   "backups": [
+    {
+     "item": "P2"
+    }
+   ]
+  },
+  {
+   "id": "F1",
+   "pool": "free",
+   "label": "Quick",
+   "rank": 1,
+   "model": "ocpaid/opencode-go/beam-free",
+   "thinking": {
+    "control": "effort",
+    "value": "low"
+   },
+   "description": "quick answers with very little thinking: greetings, small talk, a single fact, a short rewrite or translation",
+   "backups": [
+    {
+     "item": "F2"
+    }
+   ]
+  },
+  {
+   "id": "F2",
+   "pool": "free",
+   "label": "Normal",
+   "rank": 2,
+   "model": "ocpaid/opencode-go/beam-free",
+   "thinking": null,
+   "description": "everyday requests with normal thinking: ordinary questions, explanations, writing, summaries and standard code",
+   "backups": []
+  },
+  {
+   "id": "F3",
+   "pool": "free",
+   "label": "Think harder",
+   "rank": 3,
+   "model": "ocpaid/opencode-go/beam-free",
+   "thinking": {
+    "control": "effort",
+    "value": "high"
+   },
+   "description": "requests that need careful step by step reasoning: maths, logic, tricky code, planning; thinks longer before answering",
+   "backups": [
+    {
+     "item": "F2"
+    }
+   ]
+  }
  ]
 }

@@ -160,7 +160,14 @@ export const MENU_INSTRUCTIONS = {
   ignore: "how long the answer is asked to be",
 };
 
-export function buildMenuPayload({ ask, req, items, seed, previous = null, source = "chat app", body = null }) {
+export const KIND_INSTRUCTIONS = {
+  question: "What kind of task is this request?",
+  goal: "Name the kind of work the request mainly is.",
+  ignore: "how long the answer is asked to be",
+};
+
+// `kinds` (menu.kinds) adds the task-kind question; the router only does so while a specialist is on offer.
+export function buildMenuPayload({ ask, req, items, seed, previous = null, source = "chat app", body = null, kinds = null }) {
   const order = shuffleFor(items.map((i) => i.id), seed);
   const byId = new Map(items.map((i) => [i.id, i]));
   const ids = order.map((_, n) => `c${n + 1}`);
@@ -179,7 +186,10 @@ export function buildMenuPayload({ ask, req, items, seed, previous = null, sourc
       ...(previous ? { conversation: "follow-up turn" } : {}),
       ...(prevAt >= 0 ? { previous_option: ids[prevAt] } : {}),
     },
-    questions: { model: { type: "choice", instructions: MENU_INSTRUCTIONS, criteria } },
+    questions: {
+      model: { type: "choice", instructions: MENU_INSTRUCTIONS, criteria },
+      ...(kinds ? { kind: { type: "choice", instructions: KIND_INSTRUCTIONS, criteria: Object.fromEntries(Object.entries(kinds).map(([k, v]) => [k, words(v)])) } } : {}),
+    },
   };
 }
 
@@ -230,12 +240,17 @@ export function createJev({ fetchImpl = fetch, readFile = (f) => fs.readFileSync
         if (!a || !ids.includes(a.choice) || typeof a.probabilities !== "object") throw new Error("malformed model answer");
         // The menu payload (UP-10c) asks one question: each option is already a (model + thinking) pair.
         const wantsEffort = !!payload.questions?.effort;
+        // The task-kind answer (menu specialists): malformed = the whole answer is unusable, like effort.
+        const wantsKind = !!payload.questions?.kind;
+        const k = answers?.kind;
+        if (wantsKind && (!k || !Object.hasOwn(payload.questions.kind.criteria, k.choice))) throw new Error("malformed kind answer");
         if (wantsEffort && (!e || !ABSTRACT_LEVELS.includes(e.choice))) throw new Error("malformed effort answer");
         health.delete(src.name);
         return {
           ok: true, source: src.name, model, requested_model: src.model, ...(served ? { served_model: served } : {}), latency_ms: now() - ts, ...(usage ? { usage } : {}),
           choice: a.choice, index: ids.indexOf(a.choice), probabilities: a.probabilities, confidence: confidence(a.probabilities),
           ...(wantsEffort ? { effort: e.choice } : {}),
+          ...(wantsKind ? { kind: k.choice, ...(k.probabilities && typeof k.probabilities === "object" ? { kind_probabilities: k.probabilities, kind_confidence: confidence(k.probabilities) } : {}) } : {}),
           ...(wantsEffort && e.probabilities && typeof e.probabilities === "object" ? { effort_probabilities: e.probabilities, effort_confidence: confidence(e.probabilities) } : {}),
           tried,
         };

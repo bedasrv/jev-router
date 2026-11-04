@@ -5,7 +5,7 @@ import { createFacts } from "./lib/facts.mjs";
 import { inspectRequest } from "./lib/eligibility.mjs";
 import { buildList, eligibleIds } from "./lib/builder.mjs";
 import { createJev, buildPayload, buildMenuPayload, askText, requestSource } from "./lib/jev.mjs";
-import { eligibleItems, attemptsFor, stickyChoice, stickyCfg, itemById, hostThinking, thinkingWord, cachedShare } from "./lib/menu.mjs";
+import { eligibleItems, attemptsFor, stickyChoice, stickyCfg, itemById, hostThinking, thinkingWord, cachedShare, specialistsIn, kindAllows, turnCostRatio } from "./lib/menu.mjs";
 import { applyThinkingToList, minFallbacks, toHostThinking } from "./lib/thinking.mjs";
 import { createHealth } from "./lib/health.mjs";
 import { conversationKey, isFresh, createSessions, hash, headerValue, isApiSession } from "./lib/sessions.mjs";
@@ -98,14 +98,19 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       const asking = cfg.mode && cfg.mode !== "off" && !skipped && items.length >= 2;
       if (asking) {
         const previous = !api && last ? { item: last.id } : null;
-        const payload = buildMenuPayload({ ask: askText(body), req, items, seed: ctx.requestId ?? askText(body), previous, source: requestSource(ctx.headers, cfg), body });
+        // Addendum item 9: while a specialist is on offer Jev also names the task kind; a specialist pick stands only when
+        // Jev is confident about the kind too and it is one of that specialist's kinds.
+        const kinds = specialistsIn(items).length && menu.kinds ? menu.kinds : null;
+        const payload = buildMenuPayload({ ask: askText(body), req, items, seed: ctx.requestId ?? askText(body), previous, source: requestSource(ctx.headers, cfg), body, kinds });
         const res = await jevClient.ask(cfg, payload).catch((e) => ({ ok: false, error: String(e?.message ?? e), tried: [] }));
         const picked = res.ok ? itemById(menu, payload.order[res.index]) : null;
         const conf = res.ok ? Number(res.confidence.toFixed(3)) : undefined;
-        const confident = !!picked && res.confidence >= thr;
+        const kindOk = kindAllows(picked, res.kind, (res.kind_confidence ?? 0) >= thr);
+        const confident = !!picked && res.confidence >= thr && kindOk;
         if (confident && cfg.mode === "on") pick = picked;
-        jevInfo = { ok: res.ok, outcome: !res.ok ? "unavailable" : !confident ? "unconfident" : cfg.mode === "on" ? "applied" : "shadow",
+        jevInfo = { ok: res.ok, outcome: !res.ok ? "unavailable" : !kindOk && res.confidence >= thr ? "specialist_kind" : !confident ? "unconfident" : cfg.mode === "on" ? "applied" : "shadow",
           pick: picked?.id, confidence: conf, probabilities: res.ok ? res.probabilities : undefined, order: payload.order,
+          ...(kinds && res.ok ? { kind: res.kind, kind_confidence: res.kind_confidence !== undefined ? Number(res.kind_confidence.toFixed(3)) : undefined } : {}),
           source: res.source, jev_model: res.model, latency_ms: res.latency_ms, usage: res.usage, tried: res.tried?.length ? res.tried : undefined };
       }
       // Stateless API calls (session v<voucher>) have no conversation to stick to; each call stands alone.
@@ -121,10 +126,12 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     const models = attempts.map((a) => a.model);
     const byModel = Object.fromEntries(attempts.map((a) => [a.model, hostThinking(a.thinking)]));
     const values = new Set(attempts.map((a) => JSON.stringify(a.thinking)));
-    remember(ctx.requestId, { item: choice.item.id, attempts: attempts.map((a) => ({ m: a.model, thinking: thinkingWord(a.thinking), from: a.from })) });
+    const specialist = choice.item.specialist === true;
+    remember(ctx.requestId, { item: choice.item.id, specialist, attempts: attempts.map((a) => ({ m: a.model, thinking: thinkingWord(a.thinking), from: a.from })) });
     log({
       event: "decision", menu: true, id: ctx.requestId ?? null, pool, conv: hash(key), fresh, est_tokens: req.tokens, tools: req.usesTools, images: req.images,
-      item: choice.item.id, model: attempts[0].model, thinking: thinkingWord(attempts[0].thinking),
+      item: choice.item.id, specialist, model: attempts[0].model, thinking: thinkingWord(attempts[0].thinking),
+      cost_ratio: turnCostRatio(choice.item, { menu, req, body }) ?? undefined,
       attempts: attempts.map((a) => ({ m: a.model, thinking: thinkingWord(a.thinking), from: a.from })),
       source: choice.source, sticky: choice.reason, streak: choice.streak || undefined, last: last?.id,
       confidence: jevInfo?.confidence, jev: jevInfo, excluded: excluded.length ? excluded : undefined,
@@ -136,6 +143,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       reason: choice.source === "jev" ? "jev" : !fresh ? "static:cont" : "static",
       ...(choice.source === "jev" && jevInfo?.confidence !== undefined ? { confidence: jevInfo.confidence } : {}),
       item: choice.item.id,
+      specialist, // addendum item 11: the app decides how to show a specialist answer
       // Patch 0010: each attempt's own native value. `thinking` stays for a host without 0010 (0008 writes it into the
       // shared body): the pair's value only when every attempt shares it, else none, so an old host never sends one
       // model's value to another.
@@ -251,7 +259,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       const was = payload.requestId ? sent.get(payload.requestId) : null;
       if (was) sent.delete(payload.requestId);
       const won = [...payload.attempts].reverse().find((a) => a.ok)?.model;
-      const menuInfo = was ? { item: was.item, answered_by: won ?? null, backup_used: won ? won !== was.attempts[0]?.m : undefined, thinking: was.attempts.find((a) => a.m === won)?.thinking } : {};
+      const menuInfo = was ? { item: was.item, specialist: was.specialist, answered_by: won ?? null, backup_used: won ? won !== was.attempts[0]?.m : undefined, thinking: was.attempts.find((a) => a.m === won)?.thinking } : {};
       log({ event: "result", id: payload.requestId ?? null, pool: payload.model, status: payload.status, ...menuInfo,
         attempts: payload.attempts.map((a) => ({ m: a.model, ok: a.ok, s: a.status, k: a.kind, ms: a.latencyMs })),
         skipped: payload.skipped?.length ? payload.skipped : undefined,

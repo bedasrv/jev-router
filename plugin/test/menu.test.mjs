@@ -14,14 +14,23 @@ import { inspectRequest } from "../lib/eligibility.mjs";
 const MENU = JSON.parse(fs.readFileSync(new URL("../ops/menu.example.json", import.meta.url)));
 delete MENU._comment;
 const DS = "ocpaid/opencode-go/deepseek-v4.1-flash", MUSE = "ocpaid/opencode-go/muse-spark-1.3-contributor",
-  MIMO = "ocpaid/opencode-go/mimo-v2.6-flash", GLM = "ocpaid/opencode-go/glm-5.3-flash", BEAM = "ocpaid/opencode-go/beam-free";
+  MIMO = "ocpaid/opencode-go/mimo-v2.6-flash", GLM = "ocpaid/opencode-go/glm-5.3-flash", BEAM = "ocpaid/opencode-go/beam-free",
+  KIMI = "ocpaid/opencode-go/kimi-k3.1-pro", GLMB = "ocpaid/opencode-go/glm-5.3", MIMOP = "ocpaid/opencode-go/mimo-v2.6-pro",
+  MMX = "ocpaid/opencode-go/minimax-m3.1-flash", LUNA = "ocpaid/opencode-go/gpt-6-luna";
 const facts = {
   [DS]: { context_length: 1000000, tools: true, vision: true },
   [MUSE]: { context_length: 1000000, tools: true, vision: true },
   [MIMO]: { context_length: 262144, tools: true, vision: false },
   [GLM]: { context_length: 200000, tools: true, vision: false },
   [BEAM]: { context_length: 262144, tools: true, vision: false },
+  [KIMI]: { context_length: 1048576, tools: true, vision: true },
+  [GLMB]: { context_length: 1000000, tools: true, vision: false },
+  [MIMOP]: { context_length: 1048576, tools: true, vision: true },
+  [MMX]: { context_length: 1000000, tools: true, vision: false },
+  [LUNA]: { context_length: 1050000, tools: true, vision: true },
 };
+const STANDARD = MENU.items.filter((i) => !i.specialist), SPECIALISTS = MENU.items.filter((i) => i.specialist);
+const metered = () => ({ ...structuredClone(MENU), metering: true });
 const policy = (menu = MENU, jev = {}) => ({
   log_file: "log.jsonl",
   order: { paid: [DS, MUSE, GLM], free: [BEAM] },
@@ -36,7 +45,7 @@ function fakeJev() {
   let next = null;
   return {
     calls,
-    answer(item, confidence = 0.95) { next = { item, confidence }; },
+    answer(item, confidence = 0.95, kind = null, kindConfidence = 0.95) { next = { item, confidence, kind, kindConfidence }; },
     unavailable() { next = { down: true }; },
     async ask(cfg, payload) {
       calls.push(payload);
@@ -46,7 +55,8 @@ function fakeJev() {
       const n = payload.order.length, c = next.confidence;
       const top = c * (1 - 1 / n) + 1 / n; // inverse of confidence()
       const probabilities = Object.fromEntries(payload.ids.map((id, k) => [id, k === index ? top : (1 - top) / (n - 1)]));
-      return { ok: true, index, confidence: c, probabilities, source: "fake", model: "jev", latency_ms: 5, tried: [] };
+      const kindQ = payload.questions.kind ? { kind: next.kind ?? "general", kind_confidence: next.kindConfidence } : {};
+      return { ok: true, index, confidence: c, probabilities, ...kindQ, source: "fake", model: "jev", latency_ms: 5, tried: [] };
     },
   };
 }
@@ -82,9 +92,12 @@ test("UP-10c: the example menu is valid policy data, and a broken menu is refuse
   bad((m) => { delete m.items[5].prices; }, /needs .*prices/);
   bad((m) => { m.items[0].thinking = { control: "toggle", value: "high" }; }, /on\|off/);
   bad((m) => { m.sticky.downgrade_after = 0; }, /downgrade_after/);
+  bad((m) => { m.items.find((i) => i.id === "S3").kinds = ["poetry"]; }, /not in menu.kinds/);
+  bad((m) => { delete m.items.find((i) => i.id === "S3").kinds; }, /must list the task kinds/);
+  bad((m) => { m.metering = "yes"; }, /metering must be/);
 });
 
-for (const item of MENU.items) {
+for (const item of STANDARD) {
   test(`UP-10c: ${item.pool} item ${item.id} (${item.label}) is applied as its own pair, head thinking per attempt`, async () => {
     const { r, jev, logs } = mk();
     jev.answer(item.id);
@@ -105,7 +118,9 @@ for (const item of MENU.items) {
     // Jev was asked one question over the pool's items (pairs), with the owner's descriptions
     const asked = jev.calls[0];
     assert.deepEqual(Object.keys(asked.questions), ["model"]);
-    assert.equal(asked.order.length, MENU.items.filter((i) => i.pool === item.pool).length);
+    assert.equal(asked.order.length, STANDARD.filter((i) => i.pool === item.pool).length); // specialists off: metering is false
+    assert.equal(asked.questions.kind, undefined); // no specialist offered -> no task-kind question
+    assert.equal(out.specialist, false);
     assert.ok(Object.values(asked.questions.model.criteria).some((c) => c === item.description.replace(/\s+/g, " ")));
   });
 }
@@ -317,4 +332,84 @@ test("UP-10c: Jev's menu answer parses with no effort question", async () => {
   assert.equal(res.ok, true);
   assert.equal(res.index, 1);
   assert.equal(res.effort, undefined);
+});
+
+// ── Addendum (owner 2026-11-04): specialists behind requires_metering, the cutoff as a flag, specialist in log/return ──
+
+test("UP-10c addendum: specialists stay off while menu.metering is false, and are logged as excluded for that reason", async () => {
+  const { r, jev, logs } = mk();
+  jev.answer("P2");
+  await r.onRoute(turn("paid", "buat aplikasi kasir lengkap", { conv: "sp-off" }));
+  assert.ok(SPECIALISTS.every((s) => !jev.calls.at(-1).order.includes(s.id)));
+  const ex = logs().at(-1).excluded;
+  for (const s of SPECIALISTS) assert.ok(ex.some((e) => e.item === s.id && e.reason === "requires_metering"), s.id);
+});
+
+for (const item of SPECIALISTS) {
+  test(`UP-10c addendum: with metering on, specialist ${item.id} (${item.label}) is applied when Jev is confident about it and its kind`, async () => {
+    const { r, jev, logs } = mk(policy(metered()));
+    jev.answer(item.id, 0.95, item.kinds[0], 0.95);
+    const out = await r.onRoute(turn("paid", "x", { conv: `sp-${item.id}` }));
+    assert.equal(out.item, item.id);
+    assert.equal(out.specialist, true);
+    assert.equal(out.models[0], item.model);
+    assert.ok(out.models.length >= 2, "a specialist keeps a backup");
+    const d = logs().at(-1);
+    assert.equal(d.specialist, true);
+    assert.equal(typeof d.cost_ratio, "number");
+    assert.ok(jev.calls.at(-1).questions.kind, "the kind question is asked while a specialist is on offer");
+  });
+}
+
+test("UP-10c addendum: a confident specialist pick of the wrong kind, or with an unsure kind, does not stand", async () => {
+  const { r, jev, logs } = mk(policy(metered()));
+  jev.answer("S3", 0.95, "general", 0.95);
+  const wrong = await r.onRoute(turn("paid", "halo", { conv: "sk1" }));
+  assert.equal(wrong.item, "P2");
+  assert.equal(wrong.specialist, false);
+  assert.equal(logs().at(-1).jev.outcome, "specialist_kind");
+  jev.answer("S3", 0.95, "big_coding", 0.5);
+  assert.equal((await r.onRoute(turn("paid", "x", { conv: "sk2" }))).item, "P2");
+  jev.answer("S3", 0.95, "big_coding", 0.95);
+  assert.equal((await r.onRoute(turn("paid", "x", { conv: "sk3" }))).item, "S3");
+  // a standard pick never depends on the kind answer
+  jev.answer("P4", 0.95, "vision", 0.1);
+  assert.equal((await r.onRoute(turn("paid", "x", { conv: "sk4" }))).item, "P4");
+});
+
+test("UP-10c addendum: the glm cutoff is a flag: it applies while metering is off and drops once metering is on", async () => {
+  const longHistory = [{ role: "user", content: "x".repeat(400000) }, { role: "assistant", content: "ok" }];
+  const off = mk();
+  off.jev.answer("P2");
+  await off.r.onRoute(turn("paid", "lanjut", { conv: "cut1", history: longHistory }));
+  assert.ok(!off.jev.calls.at(-1).order.includes("P6"));
+  const on = mk(policy(metered()));
+  on.jev.answer("P6");
+  const out = await on.r.onRoute(turn("paid", "lanjut", { conv: "cut2", history: longHistory }));
+  assert.equal(out.item, "P6");
+  assert.ok(on.logs().at(-1).cost_ratio > 1, "the ratio is still logged");
+});
+
+test("UP-10c addendum: the result log says whether the answering item was a specialist", async () => {
+  const { r, jev, logs } = mk(policy(metered()));
+  jev.answer("S6", 0.95, "data_analysis", 0.95);
+  const t = turn("paid", "x", { conv: "sres" });
+  await r.onRoute(t);
+  r.onRouteResult({ requestId: t.requestId, model: "paid", status: 200, attempts: [{ model: LUNA, ok: true, status: 200 }] });
+  const res = logs().at(-1);
+  assert.equal(res.item, "S6");
+  assert.equal(res.specialist, true);
+  assert.equal(res.backup_used, false);
+});
+
+test("UP-10c addendum: Jev's kind answer is parsed when asked; a malformed kind makes the answer unusable", async () => {
+  const items = MENU.items.filter((i) => i.pool === "paid").slice(0, 2);
+  const payload = buildMenuPayload({ ask: "x", req: inspectRequest({ messages: [{ role: "user", content: "x" }] }), items, seed: "k", kinds: MENU.kinds });
+  assert.deepEqual(Object.keys(payload.questions), ["model", "kind"]);
+  const ok = createJev({ fetchImpl: async () => ({ ok: true, json: async () => ({ answers: { model: { choice: "c1", probabilities: { c1: 0.9, c2: 0.1 } }, kind: { choice: "big_coding", probabilities: { big_coding: 0.95, general: 0.05 } } } }) }) });
+  const r1 = await ok.ask({ sources: [{ name: "a", url: "http://x" }] }, payload);
+  assert.equal(r1.kind, "big_coding");
+  assert.ok(r1.kind_confidence > 0.8);
+  const bad = createJev({ fetchImpl: async () => ({ ok: true, json: async () => ({ answers: { model: { choice: "c1", probabilities: { c1: 0.9, c2: 0.1 } }, kind: { choice: "poetry" } } }) }) });
+  assert.equal((await bad.ask({ sources: [{ name: "a", url: "http://x" }] }, payload)).ok, false);
 });
