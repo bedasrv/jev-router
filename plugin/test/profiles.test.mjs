@@ -18,3 +18,14 @@ test("a profile becomes an option without digits or names", () => {
     assert.equal(descriptionProblems({ good_at: d, cost: "standard" }, ids).filter((p) => p.includes("names")).length, 0, d);
   }
 });
+test("UP-10c item 12: every menu item's description follows the same rules (no names, digits, negations or other options)", async () => {
+  const menu = JSON.parse(fs.readFileSync(new URL("../ops/menu.example.json", import.meta.url), "utf8"));
+  for (const it of menu.items) assert.deepEqual(descriptionProblems({ good_at: it.description, cost: "standard" }, menu.items.map((i) => i.model)), [], it.id);
+});
+test("UP-10c item 12: every model the menu dispatches has a profile from the benchmark table", async () => {
+  const menu = JSON.parse(fs.readFileSync(new URL("../ops/menu.example.json", import.meta.url), "utf8"));
+  for (const it of menu.items) assert.ok(profiles[it.model], it.model);
+  // the data-backed corrections the brief names
+  assert.match(profiles["ocpaid/opencode-go/muse-spark-1.3-contributor"].good_at, /coding/);
+  assert.match(profiles["ocpaid/opencode-go/deepseek-v4.1-flash"].weak_at, /invent/);
+});

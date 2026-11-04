@@ -4,7 +4,10 @@
 
 // auth-like failures (a gated/expired free tier, billing) do not clear in minutes, and each re-probe costs a real request
 // (seen: 7-8 s for a 403), so they back off to 30 min; transient errors cap at 10 min.
-const DEFAULTS = { base_ms: 30000, auth_base_ms: 60000, max_ms: 600000, auth_max_ms: 1800000, domain_window_ms: 60000, omni_skip_ms: 30000 };
+// A spent per-model allowance (patch 0010 `limit: true`; OpenCode Go: 5-hour, weekly, monthly dollar windows per model)
+// does not clear in minutes either: it cools 30 min, doubling to 5 h (the shortest Go window), and never counts as a
+// connection problem, because the limit belongs to that one model.
+const DEFAULTS = { base_ms: 30000, auth_base_ms: 60000, max_ms: 600000, auth_max_ms: 1800000, domain_window_ms: 60000, omni_skip_ms: 30000, limit_base_ms: 1800000, limit_max_ms: 18000000 };
 
 // Statuses that say something about the model/connection. Other 4xx (400, 404, 413, 422 ...) are about
 // the request (e.g. "Image too small", context too long, bad parameter) and must not punish the model.
@@ -22,6 +25,14 @@ export function createHealth({ now = Date.now, cfg = {}, log = () => {}, prev = 
 
   function fail(a) {
     const t = now();
+    if (a.limit === true) {
+      const m = models.get(a.model) ?? { fails: 0, until: 0 };
+      m.limits = (m.limits ?? 0) + 1; m.fails += 1; m.status = a.status; m.kind = "usage_limit"; m.limited = true;
+      m.until = Math.max(m.until, t + Math.min(c.limit_max_ms, c.limit_base_ms * 2 ** (m.limits - 1)));
+      models.set(a.model, m);
+      log({ event: "usage_limit", model: a.model, status: a.status, limits: m.limits, secs: Math.round((m.until - t) / 1000) });
+      return; // per-model: never a connection-level signal
+    }
     const m = models.get(a.model) ?? { fails: 0, until: 0 };
     m.fails += 1; m.status = a.status; m.kind = a.kind; m.until = t + dur(m.fails, a.status);
     models.set(a.model, m);
@@ -54,13 +65,14 @@ export function createHealth({ now = Date.now, cfg = {}, log = () => {}, prev = 
     }
   }
 
+  const isLimited = (id) => { const m = models.get(id); return !!m?.limited && m.until > now(); };
   const isCooling = (id) => (models.get(id)?.until ?? 0) > now() || (domains.get(domainOf(id))?.until ?? 0) > now();
   const demote = (ids) => [...ids.filter((i) => !isCooling(i)), ...ids.filter(isCooling)];
   const snapshot = () => {
     const t = now(), out = {};
-    for (const [id, m] of models) if (m.until > t) out[id] = { fails: m.fails, status: m.status, kind: m.kind, secs: Math.round((m.until - t) / 1000) };
+    for (const [id, m] of models) if (m.until > t) out[id] = { fails: m.fails, status: m.status, kind: m.kind, secs: Math.round((m.until - t) / 1000), ...(m.limited ? { limit: true } : {}) };
     for (const [d, m] of domains) if (m.until > t) out[`${d}/*`] = { status: m.status, secs: Math.round((m.until - t) / 1000) };
     return out;
   };
-  return { record, isCooling, demote, snapshot, _models: models, _domains: domains };
+  return { record, isCooling, isLimited, demote, snapshot, _models: models, _domains: domains };
 }

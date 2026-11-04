@@ -171,13 +171,13 @@ export function cachedShareCutoff(prices, basis, max, { input, output }) {
 }
 
 /** Can this item answer this request? Images need a vision route, tools a tool route, the text must fit, and an item
- * with max_cost_ratio must stay at or under it for this conversation's cached share. */
+ * with max_cost_ratio must stay at or under it for this conversation's cached share. A cooling or limit-spent head
+ * model does not take the item off the menu: attemptsFor moves or skips it, so the item's backup serves. */
 export function itemEligible(item, { facts, req, body, menu, health = null }) {
   if (item.requires_metering && menu.metering !== true) return { ok: false, reason: "requires_metering" };
   const f = facts?.[item.model];
   const r = eligible(f, req);
   if (!r.ok) return r;
-  if (health?.isCooling?.(item.model)) return { ok: false, reason: "cooling" };
   const max = item.eligibility?.max_cost_ratio;
   // until_metering: once each pack is metered per model, the pack's budget carries a costlier turn (addendum item 10).
   const capped = max !== undefined && !(item.eligibility?.until_metering && menu.metering === true);
@@ -228,6 +228,14 @@ export function attemptsFor(item, { menu, facts, req, deny = [], health = null }
   for (const id of menu?.floor_fill?.[item.pool] ?? []) {
     if (out.length >= floor) break;
     const it = itemById(menu, id); if (it) add(it.model, it.thinking, it.id);
+  }
+  // Addendum 2 (item 13): a model whose own allowance is spent is skipped while any other attempt remains, so the
+  // item's backup serves; other cooling targets move to the end (a last chance), as before.
+  if (health?.isLimited) {
+    const limited = out.filter((a) => health.isLimited(a.model));
+    if (limited.length && limited.length < out.length) {
+      for (const a of limited) { out.splice(out.indexOf(a), 1); skipped.push({ model: a.model, reason: "usage_limit", from: a.from }); }
+    }
   }
   if (health?.demote) {
     const order = health.demote(out.map((a) => a.model));

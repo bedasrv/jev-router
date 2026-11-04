@@ -1,5 +1,5 @@
 {
- "_comment": "UP-10c menu (owner go 2026-11-04). One item = one (model + native thinking) pair Jev may pick. thinking: null = provider default (no field), else {control: effort|toggle, value}. Native values are policy data from effort-pairs-research (audit-code); the ones here are the 2026-10-22 measured levels until that lands. rank: higher = heavier/costlier (stickiness only switches DOWN after sticky.downgrade_after turns Jev rates simpler). backups: tried in order after the head, each with its own thinking; same model on another account/provider goes first once one is registered, then P2. gpt-6-luna is not on the menu (owner OK 2026-11-04). Specialists (S*, addendum 2026-11-04) carry requires_metering: true and stay off until menu.metering is true (warslop's pack-metering-per-model); P6's cost cutoff has until_metering: true and stops applying then. A specialist is picked only when Jev is confident about it AND about the task kind (menu.kinds), which must be one of its kinds. S2 (muse-wonder) is left out: it is on OpenRouter only (USD 4 in / 20 out per 1M) and the routers have no OpenRouter connection, so it cannot be dispatched. Specialist thinking is the provider default until effort-pairs-research measures them. S5 passes 1.00x already: set its requires_metering to false once the research confirms its quality.",
+ "_comment": "UP-10c menu (owner go 2026-11-04). One item = one (model + native thinking) pair Jev may pick. thinking: null = provider default (no field), else {control: effort|toggle, value}. Native values are policy data from effort-pairs-research (audit-code); the ones here are the 2026-10-22 measured levels until that lands. rank: higher = heavier/costlier (stickiness only switches DOWN after sticky.downgrade_after turns Jev rates simpler). backups: tried in order after the head, each with its own thinking; same model on another account/provider goes first once one is registered, then P2. gpt-6-luna is not on the menu (owner OK 2026-11-04). Specialists (S*, addendum 2026-11-04) carry requires_metering: true and stay off until menu.metering is true (warslop's pack-metering-per-model); P6's cost cutoff has until_metering: true and stops applying then. A specialist is picked only when Jev is confident about it AND about the task kind (menu.kinds), which must be one of its kinds. S2 (muse-wonder) is left out: it is on OpenRouter only (USD 4 in / 20 out per 1M) and the routers have no OpenRouter connection, so it cannot be dispatched. Specialist thinking is the provider default until effort-pairs-research measures them. S5 passes 1.00x already: set its requires_metering to false once the research confirms its quality. Item descriptions rewritten 2026-11-04 from the per-domain benchmark table (brief item 12), see ops/model-profiles.json.",
  "threshold": 0.85,
  "defaults": {
   "paid": "P2",
@@ -63,7 +63,7 @@
    "rank": 2,
    "model": "ocpaid/opencode-go/deepseek-v4.1-flash",
    "thinking": null,
-   "description": "everyday requests with normal thinking: ordinary questions, explanations, writing and summaries in Indonesian or English, standard code",
+   "description": "everyday requests with normal thinking: questions, explanations, summaries and writing, business and knowledge work, long documents",
    "backups": []
   },
   {
@@ -76,7 +76,7 @@
     "control": "effort",
     "value": "high"
    },
-   "description": "careful expert answers for law, health, science, history, programming, web pages and charts; says plainly when it is unsure; takes more time",
+   "description": "careful expert answers where the facts must be right: law, health, science and history; coding, web pages and charts; says plainly when it is unsure and takes its time",
    "backups": [
     {
      "item": "P2"
@@ -107,7 +107,7 @@
    "rank": 3,
    "model": "ocpaid/opencode-go/mimo-v2.6-flash",
    "thinking": null,
-   "description": "multi-step work with tools: running code, reading and writing files, building or changing a project over many steps",
+   "description": "multi-step work with tools: running code, reading and writing files, step by step tasks over many tool calls",
    "backups": [
     {
      "item": "P2"
@@ -121,7 +121,7 @@
    "rank": 2,
    "model": "ocpaid/opencode-go/glm-5.3-flash",
    "thinking": null,
-   "description": "business and IT work: spreadsheets, office documents, business emails, system administration, networks and IT support",
+   "description": "business and IT work: reports, spreadsheets and office documents, diagnosing IT problems, computer security, everyday code",
    "prices": {
     "in": 0.15,
     "cached": 0.03,
@@ -151,7 +151,7 @@
    ],
    "model": "ocpaid/opencode-go/kimi-k3.1-pro",
    "thinking": null,
-   "description": "expert reasoning on hard questions, business analysis and decisions, and detailed reading of images and documents",
+   "description": "expert reasoning on hard questions, business analysis and decisions, reading images and professional reports, computer security",
    "prices": {
     "in": 2.0,
     "cached": 0.2,
@@ -178,7 +178,7 @@
    ],
    "model": "ocpaid/opencode-go/glm-5.3",
    "thinking": null,
-   "description": "large coding jobs: building a whole application, changing many files, a big refactor or a long build",
+   "description": "large coding jobs and long projects: a whole application, many files, a big refactor, long multi-step tool work",
    "prices": {
     "in": 1.4,
     "cached": 0.26,
@@ -206,7 +206,7 @@
    ],
    "model": "ocpaid/opencode-go/mimo-v2.6-pro",
    "thinking": null,
-   "description": "very long documents and many files at once, and computer security work such as vulnerabilities, logs and incidents",
+   "description": "very long documents and many files at once, computer security work, physics and scientific research code",
    "prices": {
     "in": 0.435,
     "cached": 0.003625,
@@ -230,7 +230,7 @@
    ],
    "model": "ocpaid/opencode-go/minimax-m3.1-flash",
    "thinking": null,
-   "description": "automating work through web services and APIs: connecting apps, webhooks, integrations and step by step workflows",
+   "description": "automating online services and APIs: connecting apps, webhooks, integrations and step by step workflows",
    "prices": {
     "in": 0.15,
     "cached": 0.015,
@@ -258,7 +258,7 @@
    ],
    "model": "ocpaid/opencode-go/gpt-6-luna",
    "thinking": null,
-   "description": "data analysis: tables, statistics, trends and charts from a dataset, and computer security questions",
+   "description": "data analysis with Python: tables, statistics, trends and charts from a dataset; computer security; long medical documents",
    "prices": {
     "in": 0.1,
     "cached": 0.01,
@@ -294,7 +294,7 @@
    "rank": 2,
    "model": "ocpaid/opencode-go/beam-free",
    "thinking": null,
-   "description": "everyday requests with normal thinking: ordinary questions, explanations, writing, summaries and standard code",
+   "description": "everyday chat and questions with normal thinking: explanations, writing and summaries, following instructions exactly",
    "backups": []
   },
   {
@@ -307,7 +307,7 @@
     "control": "effort",
     "value": "high"
    },
-   "description": "requests that need careful step by step reasoning: maths, logic, tricky code, planning; thinks longer before answering",
+   "description": "requests that need careful step by step reasoning: maths, logic, science questions, tricky code; thinks longer before answering",
    "backups": [
     {
      "item": "F2"

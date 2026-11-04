@@ -413,3 +413,54 @@ test("UP-10c addendum: Jev's kind answer is parsed when asked; a malformed kind 
   const bad = createJev({ fetchImpl: async () => ({ ok: true, json: async () => ({ answers: { model: { choice: "c1", probabilities: { c1: 0.9, c2: 0.1 } }, kind: { choice: "poetry" } } }) }) });
   assert.equal((await bad.ask({ sources: [{ name: "a", url: "http://x" }] }, payload)).ok, false);
 });
+
+// ── Addendum 2 (item 13): a Go model whose own allowance is spent is skipped so the item's backup serves ──
+import { createHealth } from "../lib/health.mjs";
+
+test("UP-10c item 13: a usage-limit failure cools that model 30 min, doubling to 5 h, and never the whole connection", () => {
+  let t = 0; const logged = [];
+  const h = createHealth({ now: () => t, log: (r) => logged.push(r) });
+  h.record({ attempts: [{ model: MUSE, ok: false, status: 429, kind: "rate_limit", limit: true }] });
+  assert.equal(h.isLimited(MUSE), true);
+  assert.equal(h.snapshot()[MUSE].secs, 1800);
+  assert.equal(h.snapshot()[MUSE].limit, true);
+  assert.equal(h.isCooling(DS), false, "another model on the same connection stays usable");
+  h.record({ attempts: [{ model: GLM, ok: false, status: 429, kind: "rate_limit", limit: true }] });
+  assert.equal(h.isCooling(DS), false, "two limited models are two per-model limits, not a connection failure");
+  t = 1800001; h.record({ attempts: [{ model: MUSE, ok: false, status: 429, kind: "rate_limit", limit: true }] });
+  assert.equal(h.snapshot()[MUSE].secs, 3600);
+  for (let i = 0; i < 6; i++) { t += 10 ** 8; h.record({ attempts: [{ model: MUSE, ok: false, status: 429, kind: "rate_limit", limit: true }] }); }
+  assert.equal(h.snapshot()[MUSE].secs, 18000);
+  assert.ok(logged.some((l) => l.event === "usage_limit" && l.model === MUSE && l.secs === 1800));
+  h.record({ attempts: [{ model: MUSE, ok: true, status: 200 }] });
+  assert.equal(h.isLimited(MUSE), false, "a success clears it");
+  // a short 429 without the limit flag keeps the old, short cooldown
+  const s = createHealth({ now: () => 0 });
+  s.record({ attempts: [{ model: MUSE, ok: false, status: 429, kind: "rate_limit" }] });
+  assert.equal(s.isLimited(MUSE), false);
+  assert.equal(s.snapshot()[MUSE].secs, 30);
+});
+
+test("UP-10c item 13: the item stays, its spent head model is skipped, and the backup serves; the skip is logged", async () => {
+  const { r, jev, logs } = mk();
+  jev.answer("P3");
+  const first = turn("paid", "pasal", { conv: "lim0" });
+  await r.onRoute(first); // the log opens on the first decision, as in production
+  r.onRouteResult({ requestId: first.requestId, model: "paid", status: 200, attempts: [{ model: MUSE, ok: false, status: 429, kind: "rate_limit", limit: true }, { model: DS, ok: true, status: 200 }] });
+  const out = await r.onRoute(turn("paid", "pasal berapa", { conv: "lim" }));
+  assert.equal(out.item, "P3");
+  assert.ok(!out.models.includes(MUSE));
+  assert.equal(out.models[0], DS);
+  assert.deepEqual(out.thinking_by_model[DS], { control: "none" }, "the backup keeps its own value");
+  const d = logs().filter((l) => l.event === "decision").at(-1);
+  assert.ok(d.skipped.some((s) => s.model === MUSE && s.reason === "usage_limit"));
+  assert.ok(logs().some((l) => l.event === "usage_limit" && l.model === MUSE));
+});
+
+test("UP-10c item 13: when every attempt is limit-spent they are all kept, so the turn fails honestly", () => {
+  const h = createHealth({ now: () => 0 });
+  h.record({ attempts: [{ model: BEAM, ok: false, status: 429, kind: "rate_limit", limit: true }] });
+  const f3 = MENU.items.find((i) => i.id === "F3");
+  const { attempts } = attemptsFor(f3, { menu: MENU, facts, req: inspectRequest({ messages: [{ role: "user", content: "x" }] }), health: h });
+  assert.deepEqual(attempts.map((a) => a.model), [BEAM]);
+});

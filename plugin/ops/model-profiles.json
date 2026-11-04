@@ -1,36 +1,53 @@
 {
-  "_comment": "What Jev reads about each paid option (policy.models[*].good_at/weak_at/cost/measured), jev-prompt-v2 (2026-11-03). Rules, checked by descriptionProblems in lib/jev.mjs and by test/profiles.test.mjs: no model names, no digits, no negations, no reference to another option; each option is described on its own. Source: Artificial Analysis at the variant matching the effort the router actually sends (deepseek-v4.1-flash at high; mimo-v2.6-pro in its only mode); the glm-5.3-flash, qwen3.8-flash and muse-spark rows exist only at max/xhigh, hence 'measured at its top setting'. Lead's readings: deepseek-v4.1-flash high intelligence 29, agentic coding 29%, SWE 17%, agentic work 68% (highest), fastest; mimo-v2.6-pro agentic coding 35% (highest real), SWE 24%, slow start (3.5 s, 44 tok/s), hallucinates on knowledge; glm-5.3-flash coding 33% at max, 75 tok/s; qwen3.8-flash coding 25%, hallucinates most (-12); muse-spark non-hallucination +26 (highest), coding 8%; gpt-6-luna high coding 5% (lowest; hidden from Jev, jev.hidden). Cost words from the Go list output price per 1M tokens (docs/NOTES-pricing-2026-10-26.md in warslop): up to $0.25 cheapest (muse 0.20), up to $0.65 standard (deepseek 0.60 off-peak, glm 0.50, qwen 0.47, luna 0.50), above that pricier (mimo 0.87). Revision 2 (after the first jev-eval run): muse was over-picked for quick facts, proofs, puzzles and long documents, so its good_at is narrowed to specialist knowledge and its weak_at names its slowness on every request; deepseek's good_at names quick everyday questions, maths and reasoning.",
-  "ocpaid/opencode-go/deepseek-v4.1-flash": {
-    "good_at": "quick answers at high speed, everyday questions, maths and reasoning, long documents and long conversations, multi-step agentic work with tools, everyday coding",
-    "weak_at": "deep software engineering on large codebases",
-    "cost": "standard"
-  },
-  "ocpaid/opencode-go/mimo-v2.6-pro": {
-    "good_at": "agentic coding and software engineering: multi-step coding, debugging and repository work with tools; long documents",
-    "weak_at": "slow to start and slow to write; recalling facts from memory, where it tends to invent details",
-    "cost": "pricier"
-  },
-  "ocpaid/opencode-go/glm-5.3-flash": {
-    "good_at": "coding and debugging, with quick output",
-    "weak_at": "specialist legal and medical knowledge",
-    "cost": "standard",
-    "measured": "measured at its top setting"
-  },
-  "ocpaid/opencode-go/qwen3.8-flash": {
-    "good_at": "general tasks and everyday coding, reading images",
-    "weak_at": "factual accuracy, where it often invents facts; hard multi-step reasoning",
-    "cost": "standard",
-    "measured": "measured at its top setting"
-  },
-  "ocpaid/opencode-go/muse-spark-1.3-contributor": {
-    "good_at": "specialist knowledge questions in law, medicine and science, where care matters above speed; it admits uncertainty readily",
-    "weak_at": "slow on every request, since it thinks before each answer; quick questions, puzzles and proofs, long documents, coding and tool tasks",
-    "cost": "cheapest",
-    "measured": "measured at its top setting"
-  },
-  "ocpaid/opencode-go/gpt-6-luna": {
-    "good_at": "short general answers",
-    "weak_at": "coding, tool use and hard reasoning",
-    "cost": "standard"
-  }
+ "_comment": "What Jev reads about each option's model (policy.models[*].good_at/weak_at/cost), rewritten 2026-11-04 (brief item 12) from ~/effort-research/domain-benchmarks-2026-11-04.md (OpenRouter benchmarks and Artificial Analysis mirrors as of 2026-11-04), replacing the 2026-10-21 text that was wrong in places (muse-spark was described as weak at code and tools; the data makes it the strongest coder, web/UI builder and the most reliable on facts of the cheap models). Per model: its two to four strongest and one to three weakest domains in the table. Owner rules: every model handles Bahasa Indonesia; a score without an effort label is the model's highest effort. Rules, checked by descriptionProblems in lib/jev.mjs and test/profiles.test.mjs: no model names, no digits, no negations, no reference to another option. Cost word from the Go output price per 1M tokens: up to USD 0.25 cheapest (muse 0.20), up to 0.65 standard (mimo-v2.6-flash 0.28, glm-5.3-flash 0.50, gpt-6-luna 0.50, minimax-m3.1-flash 0.60, deepseek-v4.1-flash 0.60 off-peak / 1.20 peak), above that pricier (mimo-v2.6-pro 0.87, glm-5.3 4.40, kimi-k3.1-pro 10.00); beam-free is free. Readings used: deepseek GDPval 1746, AA-LCR 84.0, GPQA 87.9 | Omniscience -5.3, CritPt 14.3, Harvey 1.7. glm-5.3-flash GDPval 1773, ITBench 51.2, Cyber 49.9, Coding 71.5 | price on long cache-heavy chats (cached read 0.03 vs basis 0.006), Harvey 0.8. minimax AutomationBench 72.5, HLE 48.0, GPQA 87.6 | Omniscience -6.4, GDPval 1466, tau-bench 66.7. mimo-v2.6-flash tau-bench 77.9, SciCode 51.3 | Omniscience -10.8, GPQA 73.2, CritPt 12.0. gpt-6-luna AnalystAgent 43.8, Cyber 52.7, MLCR 26.1 | tau-bench 67.3, GDPval 1445. muse-spark-1.3 Omniscience 25.0, Harvey 8.9, CritPt 24.9, Coding 75.8, SciCode 58.8, Design Arena ~1340, tau3 50.5 | its time on every request. mimo-v2.6-pro AA-LCR 86.3, Cyber 56.1, HLE 49.4, CritPt 26.6, SciCode 60.9 | MLCR 12.8, GDP.pdf 19.2. glm-5.3 Coding 74.8, tau-bench 76.0, GDPval 1769, Briefcase 1504 | Cyber 36.4, Harvey 0.3, GDP.pdf 11.2. beam-free IFBench 79.6, GPQA 88.4 | GDPval 1177, Briefcase 976. kimi-k3.1-pro HLE 52.5, GDPval 1846, MMMU Pro 84.1, Cyber 64.1, GDP.pdf 31.4, MLCR 38.3 | AnalystAgent 38.8. muse-wonder is left out: no route dispatches it.",
+ "ocpaid/opencode-go/deepseek-v4.1-flash": {
+  "good_at": "business and knowledge work, long documents and long conversations, science knowledge, quick everyday answers",
+  "weak_at": "recalling facts, where it tends to invent details; physics research; legal drafting",
+  "cost": "standard"
+ },
+ "ocpaid/opencode-go/glm-5.3-flash": {
+  "good_at": "business and knowledge work, diagnosing IT incidents, computer security, everyday coding",
+  "weak_at": "long conversations that reuse a large cached context, where its price climbs; legal drafting",
+  "cost": "standard"
+ },
+ "ocpaid/opencode-go/minimax-m3.1-flash": {
+  "good_at": "automating online services and APIs, expert reasoning on hard questions, science knowledge",
+  "weak_at": "recalling facts, where it tends to invent details; business documents; tool use inside a support dialog",
+  "cost": "standard"
+ },
+ "ocpaid/opencode-go/mimo-v2.6-flash": {
+  "good_at": "multi-step work with tools, scientific code",
+  "weak_at": "recalling facts, where it often invents details; science knowledge; physics research",
+  "cost": "standard"
+ },
+ "ocpaid/opencode-go/gpt-6-luna": {
+  "good_at": "data analysis with Python, computer security, long medical documents, science knowledge",
+  "weak_at": "tool use inside a support dialog; business documents; long multi-part projects",
+  "cost": "standard"
+ },
+ "ocpaid/opencode-go/muse-spark-1.3-contributor": {
+  "good_at": "getting facts right and saying when it is unsure, legal drafting, science and physics research, coding, web pages and charts, careful tool use in service dialogs",
+  "weak_at": "quick replies, since it thinks before every answer",
+  "cost": "cheapest"
+ },
+ "ocpaid/opencode-go/mimo-v2.6-pro": {
+  "good_at": "very long documents, computer security, expert reasoning, physics research and scientific code",
+  "weak_at": "long medical records; polished professional reports",
+  "cost": "pricier"
+ },
+ "ocpaid/opencode-go/glm-5.3": {
+  "good_at": "large coding jobs, multi-step tool use, business and knowledge work, long multi-part projects",
+  "weak_at": "computer security; legal drafting; polished professional reports",
+  "cost": "pricier"
+ },
+ "ocpaid/opencode-go/beam-free": {
+  "good_at": "following instructions exactly, science knowledge, everyday chat",
+  "weak_at": "business documents; long multi-part projects",
+  "cost": "free"
+ },
+ "ocpaid/opencode-go/kimi-k3.1-pro": {
+  "good_at": "expert reasoning on hard questions, business analysis, reading images, computer security, professional reports and long medical documents",
+  "weak_at": "data analysis with Python",
+  "cost": "pricier"
+ }
 }

@@ -1,18 +1,88 @@
-From f3d824bd489a6d2918860ed51ce9dda3011edffe Mon Sep 17 00:00:00 2001
+From a70323db2e6c9c596ce2adf293b426ba3d955b0f Mon Sep 17 00:00:00 2001
 From: build-router <build-router@warslop-dev>
 Date: Wed, 4 Nov 2026 13:56:53 +0700
-Subject: [PATCH] plugins: per-attempt thinking and menu item provenance
+Subject: [PATCH] plugins: per-attempt thinking, menu item provenance,
+ usage-limit signal
 
-0008 writes one thinking shape into the shared request body before the combo runs, so every fallback attempt carries the head model's value; a plugin that wants each attempt on its own model's native value (jev-router's menu, UP-10c) could only send none or drop backups. onRoute may now return thinking_by_model {<target id>: {control, value}} (same allowlist as 0008, only targets in the final list), item (a menu id, ^[A-Za-z0-9_-]{1,16}$) and specialist (boolean, only with an item). With a map, the shared-body write is skipped and the plugin combo's handleSingleModel applies applyPluginRouteThinking(b, pluginAttemptThinking(combo, m)) on each attempt's own body copy; a target the map leaves out gets {control:"none"} (client effort cleared), and the global fallback model is sent with none as well. Without a map, 0008's behaviour is unchanged. buildPluginRouteHeaders adds x-router-item, x-router-specialist (yes|no) and x-router-thinking (the answering attempt's value, "default" when no field was sent); the 0009 in-band x_omniroute object carries item, specialist and thinking too. Unit tests in plugins-onroute and earlyStreamKeepalive.
+0008 writes one thinking shape into the shared request body before the combo runs, so every fallback attempt carries the head model's value; a plugin that wants each attempt on its own model's native value (jev-router's menu, UP-10c) could only send none or drop backups. onRoute may now return thinking_by_model {<target id>: {control, value}} (same allowlist as 0008, only targets in the final list), item (a menu id, ^[A-Za-z0-9_-]{1,16}$) and specialist (boolean, only with an item). With a map, the shared-body write is skipped and the plugin combo's handleSingleModel applies applyPluginRouteThinking(b, pluginAttemptThinking(combo, m)) on each attempt's own body copy; a target the map leaves out gets {control:"none"} (client effort cleared), and the global fallback model is sent with none as well. Without a map, 0008's behaviour is unchanged. buildPluginRouteHeaders adds x-router-item, x-router-specialist (yes|no) and x-router-thinking (the answering attempt's value, "default" when no field was sent); the 0009 in-band x_omniroute object carries item, specialist and thinking too.
+
+Usage limits: OpenCode Go limits each model by dollars per 5 hours, week and month, and a spent allowance answers 429 like a short rate limit, so onRouteResult could not tell them apart (kind is rate_limit for both and no error text reaches a plugin). isUsageLimitError (429/402/403 whose text says usage limit, limit reached, quota, allowance, insufficient balance/credit, or Go's "subscribe to OpenCode Go") marks the trace outcome limit:true, and onRouteResult attempts carry limit:true; the text itself still never leaves the host. Unit tests in plugins-onroute and earlyStreamKeepalive.
 ---
- open-sse/utils/earlyStreamKeepalive.ts  |  3 +
- src/lib/plugins/hooks.ts                | 10 +++
- src/sse/handlers/chat.ts                | 20 ++++--
- src/sse/handlers/chat/pluginOnRoute.ts  | 61 ++++++++++++++++++
- tests/unit/earlyStreamKeepalive.test.ts | 11 ++++
- tests/unit/plugins-onroute.test.ts      | 84 +++++++++++++++++++++++++
- 6 files changed, 185 insertions(+), 4 deletions(-)
+ .../services/combo/comboErrorAggregation.ts   |  11 ++
+ open-sse/services/combo/decisionTrace.ts      |   2 +
+ .../services/combo/executeTargetAttempt.ts    |   4 +-
+ open-sse/utils/earlyStreamKeepalive.ts        |   3 +
+ src/lib/plugins/hooks.ts                      |  12 ++
+ src/sse/handlers/chat.ts                      |  20 +++-
+ src/sse/handlers/chat/pluginOnRoute.ts        |  62 ++++++++++
+ tests/unit/earlyStreamKeepalive.test.ts       |  11 ++
+ tests/unit/plugins-onroute.test.ts            | 107 ++++++++++++++++++
+ 9 files changed, 227 insertions(+), 5 deletions(-)
 
+diff --git a/open-sse/services/combo/comboErrorAggregation.ts b/open-sse/services/combo/comboErrorAggregation.ts
+index 9331ec70..d7c748fe 100644
+--- a/open-sse/services/combo/comboErrorAggregation.ts
++++ b/open-sse/services/combo/comboErrorAggregation.ts
+@@ -70,6 +70,17 @@ export function classifyComboOutcome(status: number, errorText: string): ComboOu
+   return "model";
+ }
+ 
++/**
++ * Patch 0010: a provider's spent allowance for this model (a per-model usage limit, a quota), as opposed to a short
++ * rate limit. OpenCode Go limits each model by dollars per 5 hours, week and month; its free tier says "Free usage
++ * limit reached". Only the boolean leaves the host (the error text never reaches a plugin).
++ */
++const USAGE_LIMIT_TEXT = /usage.?limit|limit (has been )?reached|quota|allowance|exceeded your|insufficient (balance|credit|quota)|subscribe to opencode go/i;
++export function isUsageLimitError(status: number | null | undefined, errorText: unknown): boolean {
++  if (status !== 429 && status !== 402 && status !== 403) return false;
++  return typeof errorText === "string" && USAGE_LIMIT_TEXT.test(errorText);
++}
++
+ /**
+  * Redact connection/account identifiers that can ride inside a proxy target's
+  * model string (openai-compatible proxy model names often carry a connection
+diff --git a/open-sse/services/combo/decisionTrace.ts b/open-sse/services/combo/decisionTrace.ts
+index 8d9b5ab1..edee0bfb 100644
+--- a/open-sse/services/combo/decisionTrace.ts
++++ b/open-sse/services/combo/decisionTrace.ts
+@@ -114,6 +114,8 @@ export interface ComboOutcomeEntry {
+   /** classifyComboOutcome kind (auth | rate_limit | timeout | provider | model | quality ...), null on success. */
+   kind: string | null;
+   latencyMs: number;
++  /** Patch 0010: the failure was a spent per-model allowance (isUsageLimitError), not a short rate limit. */
++  limit?: boolean;
+   ts: number;
+ }
+ 
+diff --git a/open-sse/services/combo/executeTargetAttempt.ts b/open-sse/services/combo/executeTargetAttempt.ts
+index 0601ebf7..15d209a0 100644
+--- a/open-sse/services/combo/executeTargetAttempt.ts
++++ b/open-sse/services/combo/executeTargetAttempt.ts
+@@ -88,7 +88,7 @@ import {
+   recordQuotaExhaustionClassification,
+ } from "./quotaExhaustion.ts";
+ import { markAccountExhaustedFromCredits } from "../../../src/domain/quotaCache.ts";
+-import { classifyComboOutcome, redactConnectionLabel } from "./comboErrorAggregation.ts";
++import { classifyComboOutcome, isUsageLimitError, redactConnectionLabel } from "./comboErrorAggregation.ts";
+ import { readConnectionForCooldownGate } from "./executeTargetGates.ts";
+ import { recordLkgpPin } from "./recordLkgpPin.ts";
+ import {
+@@ -1029,6 +1029,7 @@ export async function executeTargetAttempt(
+         status: result.status,
+         kind: classifyComboOutcome(result.status, errorText),
+         latencyMs: Date.now() - attemptStartedAt,
++        ...(isUsageLimitError(result.status, errorText) ? { limit: true } : {}),
+       });
+       state.lastStatus = result.status;
+       // Terminal stop ("stopping combo"): no later target is tried, so this is not
+@@ -1274,6 +1275,7 @@ export async function executeTargetAttempt(
+       status: result.status,
+       kind: classifyComboOutcome(result.status, errorText),
+       latencyMs: Date.now() - attemptStartedAt,
++      ...(isUsageLimitError(result.status, errorText) ? { limit: true } : {}),
+     });
+     state.lastStatus = result.status;
+     state.fallbackCount++;
 diff --git a/open-sse/utils/earlyStreamKeepalive.ts b/open-sse/utils/earlyStreamKeepalive.ts
 index 5f67e2e1..0af6c515 100644
 --- a/open-sse/utils/earlyStreamKeepalive.ts
@@ -28,7 +98,7 @@ index 5f67e2e1..0af6c515 100644
  
  /**
 diff --git a/src/lib/plugins/hooks.ts b/src/lib/plugins/hooks.ts
-index 07b5b7e9..64ec4b5b 100644
+index 07b5b7e9..3a458607 100644
 --- a/src/lib/plugins/hooks.ts
 +++ b/src/lib/plugins/hooks.ts
 @@ -277,6 +277,16 @@ export interface PluginRouteResult {
@@ -48,6 +118,15 @@ index 07b5b7e9..64ec4b5b 100644
  }
  
  export interface PluginResult {
+@@ -317,6 +327,8 @@ export interface PluginRouteOutcome {
+   /** auth | rate_limit | timeout | provider | model | ... (null on success). Never an error body. */
+   kind: string | null;
+   latencyMs: number;
++  /** Patch 0010: true when the provider said this model's allowance is spent (a usage limit, not a short rate limit). */
++  limit?: boolean;
+ }
+ 
+ /**
 diff --git a/src/sse/handlers/chat.ts b/src/sse/handlers/chat.ts
 index f5f60b67..3f2f8f06 100644
 --- a/src/sse/handlers/chat.ts
@@ -108,7 +187,7 @@ index f5f60b67..3f2f8f06 100644
                clientRawRequest,
                request,
 diff --git a/src/sse/handlers/chat/pluginOnRoute.ts b/src/sse/handlers/chat/pluginOnRoute.ts
-index e1467bb6..00eee52e 100644
+index e1467bb6..c73936f3 100644
 --- a/src/sse/handlers/chat/pluginOnRoute.ts
 +++ b/src/sse/handlers/chat/pluginOnRoute.ts
 @@ -28,6 +28,12 @@ type PluginRouteMetadata = {
@@ -219,6 +298,14 @@ index e1467bb6..00eee52e 100644
    return headers;
  }
  
+@@ -291,6 +352,7 @@ export function emitPluginRouteResult(args: {
+           status: o.status,
+           kind: o.kind,
+           latencyMs: o.latencyMs,
++          ...(o.limit ? { limit: true } : {}),
+         })),
+         skipped: trace.decisions
+           .filter((d) => d.decision === "skipped_before_dispatch")
 diff --git a/tests/unit/earlyStreamKeepalive.test.ts b/tests/unit/earlyStreamKeepalive.test.ts
 index 172b8482..773a63b1 100644
 --- a/tests/unit/earlyStreamKeepalive.test.ts
@@ -239,7 +326,7 @@ index 172b8482..773a63b1 100644
 +  assert.deepEqual(meta?.x_omniroute, { route: "ocpaid/opencode-go/muse-spark-1.3-contributor", attempts: "1", reason: "jev", confidence: "0.91", item: "P3", thinking: "high", specialist: "no" });
 +});
 diff --git a/tests/unit/plugins-onroute.test.ts b/tests/unit/plugins-onroute.test.ts
-index 0f9291eb..66b3daac 100644
+index 0f9291eb..7ec4f006 100644
 --- a/tests/unit/plugins-onroute.test.ts
 +++ b/tests/unit/plugins-onroute.test.ts
 @@ -21,6 +21,7 @@ import {
@@ -250,7 +337,7 @@ index 0f9291eb..66b3daac 100644
    runPluginOnRouteHook,
    withPluginRouteHeaders,
    MAX_PLUGIN_ROUTE_MODELS,
-@@ -230,3 +231,86 @@ test("emitPluginRouteResult swallows a throwing handler and a missing trace", as
+@@ -230,3 +231,109 @@ test("emitPluginRouteResult swallows a throwing handler and a missing trace", as
    assert.doesNotThrow(() => emitPluginRouteResult({ requestId: "r7", requestedModel: "free", combo, response: { status: 502 } }));
    await new Promise((r) => setTimeout(r, 30));
  });
@@ -336,6 +423,29 @@ index 0f9291eb..66b3daac 100644
 +  startComboTrace(id, { strategy: "priority", comboName: "paid" });
 +  recordComboOutcome(id, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 100 });
 +  assert.deepEqual(buildPluginRouteHeaders(combo), { "x-omniroute-route": "a/x", "x-omniroute-attempts": "1", "x-router-reason": "static" });
++});
++
++test("0010: a spent per-model allowance is flagged on the attempt (never its text); a short rate limit is not", async () => {
++  const { isUsageLimitError } = await import("../../open-sse/services/combo/comboErrorAggregation.ts");
++  assert.equal(isUsageLimitError(429, "Free usage limit reached. Free models work in OpenCode; subscribe to OpenCode Go to keep going"), true);
++  assert.equal(isUsageLimitError(429, '{"error":{"type":"UsageLimitError","message":"Usage limit reached for this model"}}'), true);
++  assert.equal(isUsageLimitError(429, "monthly quota exceeded"), true);
++  assert.equal(isUsageLimitError(402, "insufficient balance"), true);
++  assert.equal(isUsageLimitError(429, "Rate limit exceeded. Please try again later."), false);
++  assert.equal(isUsageLimitError(503, "usage limit reached"), false);
++  assert.equal(isUsageLimitError(200, "usage limit"), false);
++
++  const combo = buildPluginRouteCombo("paid", ["a/x", "b/y"], "r30", { reason: "jev" });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, { target: "a/x", ok: false, status: 429, kind: "rate_limit", latencyMs: 40, limit: true });
++  recordComboOutcome(id, { target: "b/y", ok: true, status: 200, kind: null, latencyMs: 500 });
++  let got: any = null;
++  registerHook("onRouteResult", "p", (payload: unknown) => { got = payload; }, 1);
++  emitPluginRouteResult({ requestId: "r30", requestedModel: "paid", combo, response: { status: 200 } });
++  for (let i = 0; i < 20 && !got; i++) await new Promise((r) => setTimeout(r, 5));
++  assert.deepEqual(got.attempts.map((a: any) => a.limit), [true, undefined]);
++  assert.ok(!JSON.stringify(got).toLowerCase().includes("usage limit"), "no error text reaches the plugin");
 +});
 -- 
 2.47.3
