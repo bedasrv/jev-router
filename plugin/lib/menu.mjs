@@ -3,7 +3,8 @@
 // request and the conversation's last decision.
 //
 // policy.menu = {
-//   threshold?: 0.85,                       // confidence Jev needs (defaults to jev.threshold)
+//   threshold?: 0.85,                       // confidence Jev needs for a fresh pick (defaults to jev.threshold)
+//   switch_threshold?: 0.85,                // confidence Jev needs to LEAVE the conversation's last item (defaults to threshold)
 //   defaults: { paid: "P2", free: "F2" },   // the item when Jev is not confident and the conversation has none
 //   min_attempts?: 2,                       // floor: head + backups, never fewer while more are eligible
 //   sticky?: { downgrade_after: 2, effort_change_is_switch: false },
@@ -114,6 +115,8 @@ export function validateMenu(menu) {
   }
   const th = menu.threshold;
   if (th !== undefined && !(Number.isFinite(th) && th >= 0 && th <= 1)) throw new Error("menu.threshold must be 0..1");
+  const sth = menu.switch_threshold;
+  if (sth !== undefined && !(Number.isFinite(sth) && sth >= 0 && sth <= 1)) throw new Error("menu.switch_threshold must be 0..1");
   const ma = menu.min_attempts;
   if (ma !== undefined && !(Number.isInteger(ma) && ma >= 1)) throw new Error("menu.min_attempts must be a positive integer");
   const da = menu.sticky?.downgrade_after;

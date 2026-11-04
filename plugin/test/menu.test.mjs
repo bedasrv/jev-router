@@ -129,18 +129,19 @@ test("UP-10c: per attempt thinking: a backup keeps its own value and never force
   const { r, jev } = mk();
   jev.answer("P1");
   const out = await r.onRoute(turn("paid", "halo", { conv: "pa" }));
-  // P1 = deepseek low; its same-role Go backup is muse at low (P2 is the same target as the head, kept once)
-  assert.deepEqual(out.models, [DS, MUSE]);
-  assert.deepEqual(out.thinking_by_model, { [DS]: { control: "effort", value: "low" }, [MUSE]: { control: "effort", value: "low" } });
-  assert.deepEqual(out.thinking, { control: "effort", value: "low" }); // every attempt shares it: an old host may apply it
+  // P1 = deepseek low; its backup P2 is the same target as the head (kept once, the Go accounts rotate inside the
+  // attempt), so the floor tops it up with P6 at its own default (lead 2026-11-05: no model-type backups)
+  assert.deepEqual(out.models, [DS, GLM]);
+  assert.deepEqual(out.thinking_by_model, { [DS]: { control: "effort", value: "low" }, [GLM]: { control: "none" } });
+  assert.deepEqual(out.thinking, { control: "none" }); // attempts differ: an old host gets no shared value
   jev.answer("P3");
   const p3 = await r.onRoute(turn("paid", "pasal berapa", { conv: "pb" }));
-  assert.deepEqual(p3.models, [MUSE, DS]);
-  assert.deepEqual(p3.thinking_by_model, { [MUSE]: { control: "effort", value: "high" }, [DS]: { control: "effort", value: "high" } });
+  assert.deepEqual(p3.models, [MUSE, DS]); // P3 backs up to P2: deepseek at its default, never deepseek at high
+  assert.deepEqual(p3.thinking_by_model, { [MUSE]: { control: "effort", value: "high" }, [DS]: { control: "none" } });
   jev.answer("P4");
   const p4 = await r.onRoute(turn("paid", "buktikan", { conv: "pc" }));
-  assert.deepEqual(p4.thinking_by_model, { [DS]: { control: "effort", value: "max" }, [MUSE]: { control: "effort", value: "high" } });
-  // a host without patch 0010 gets no shared value when attempts differ (it would send max to muse)
+  assert.deepEqual(p4.thinking_by_model, { [DS]: { control: "effort", value: "max" }, [GLM]: { control: "none" } });
+  // a host without patch 0010 gets no shared value when attempts differ (it would send max to glm)
   assert.deepEqual(p4.thinking, { control: "none" });
 });
 
@@ -317,7 +318,7 @@ test("UP-10c: the result log names the item, the attempt that answered and wheth
   assert.equal(res.item, "P3");
   assert.equal(res.answered_by, DS);
   assert.equal(res.backup_used, true);
-  assert.equal(res.thinking, "high"); // the answering backup's own value (deepseek high, P3's same-role Go backup)
+  assert.equal(res.thinking, "default"); // the answering backup's own value (P2: deepseek at its default)
 });
 
 test("UP-10c: without policy.menu the router keeps the old model + effort behaviour", async () => {
@@ -457,7 +458,7 @@ test("UP-10c item 13: the item stays, its spent head model is skipped, and the b
   assert.equal(out.item, "P3");
   assert.ok(!out.models.includes(MUSE));
   assert.equal(out.models[0], DS);
-  assert.deepEqual(out.thinking_by_model[DS], { control: "effort", value: "high" }, "the backup keeps its own value");
+  assert.deepEqual(out.thinking_by_model[DS], { control: "none" }, "the backup (P2) keeps its own value");
   const d = logs().filter((l) => l.event === "decision").at(-1);
   assert.ok(d.skipped.some((s) => s.model === MUSE && s.reason === "usage_limit"));
   assert.ok(logs().some((l) => l.event === "usage_limit" && l.model === MUSE));
@@ -500,4 +501,62 @@ test("UP-10c Addendum 3: OpenCode Go only: an item or backup outside menu.allowe
   bad((m) => { m.items[0].backups = [{ model: "openrouter/deepseek/deepseek-v4.1-flash", thinking: null }]; }, /outside menu.allowed_prefixes/);
   bad((m) => { m.items.find((i) => i.id === "S1").model = "deepseekapi/deepseek-chat"; }, /outside menu.allowed_prefixes/);
   bad((m) => { m.allowed_prefixes = []; }, /allowed_prefixes must list/);
+});
+
+test("UP-10c (lead 2026-11-05): a fresh pick stands at 0.6, below it the default; leaving the last item still needs 0.85", async () => {
+  const { r, jev, logs } = mk();
+  assert.equal(MENU.threshold, 0.6);
+  assert.equal(MENU.switch_threshold, 0.85);
+  jev.answer("P4", 0.7);
+  assert.equal((await r.onRoute(turn("paid", "buktikan", { conv: "th1" }))).item, "P4"); // fresh: applied at 0.7
+  assert.equal(logs().at(-1).jev.outcome, "applied");
+  jev.answer("P4", 0.5);
+  assert.equal((await r.onRoute(turn("paid", "buktikan", { conv: "th2" }))).item, "P2"); // fresh, unconfident: P2
+  jev.answer("F3", 0.7);
+  assert.equal((await r.onRoute(turn("free", "17 x 23", { conv: "th3" }))).item, "F3");
+  jev.answer("F3", 0.5);
+  assert.equal((await r.onRoute(turn("free", "17 x 23", { conv: "th4" }))).item, "F2"); // free default
+  // A conversation on P2: a switch to P3 at 0.7 is held (the stricter rule), at 0.9 it goes.
+  jev.answer("P2", 0.9); await r.onRoute(turn("paid", "a", { conv: "th5" }));
+  jev.answer("P3", 0.7);
+  assert.equal((await r.onRoute(turn("paid", "pasal", { conv: "th5", history: followUp(1) }))).item, "P2");
+  assert.equal(logs().at(-1).jev.outcome, "switch_held");
+  assert.equal(logs().at(-1).sticky, "unconfident");
+  jev.answer("P2", 0.65); // staying on the same item only needs the fresh threshold
+  assert.equal((await r.onRoute(turn("paid", "b", { conv: "th5", history: followUp(2) }))).item, "P2");
+  assert.equal(logs().at(-1).sticky, "same");
+  jev.answer("P3", 0.9);
+  assert.equal((await r.onRoute(turn("paid", "pasal", { conv: "th5", history: followUp(3) }))).item, "P3");
+  assert.equal(logs().at(-1).sticky, "task_changed");
+});
+
+test("UP-10c (lead 2026-11-05): backups are the reviewed ones: same-role items or P2 only, never a model-type pair", () => {
+  for (const it of MENU.items) for (const b of it.backups ?? []) assert.ok(b.item !== undefined, `${it.id} backs up to a bare model ${b.model}`);
+  const p3 = MENU.items.find((i) => i.id === "P3");
+  const { attempts } = attemptsFor(p3, { menu: MENU, facts, req: inspectRequest({ messages: [{ role: "user", content: "x" }] }) });
+  assert.deepEqual(attempts.map((a) => [a.model, a.thinking?.value ?? "default"]), [[MUSE, "high"], [DS, "default"]]); // never deepseek at high
+});
+
+test("UP-10c (lead 2026-11-05): P1 and F1 no longer offer 'a single fact'; P3 owns facts that must be right", () => {
+  const d = Object.fromEntries(MENU.items.map((i) => [i.id, i.description]));
+  for (const id of ["P1", "F1"]) assert.doesNotMatch(d[id], /fact/i, id);
+  assert.match(d.P3, /facts must be right/);
+  for (const w of ["history", "capitals", "science"]) assert.match(d.P3, new RegExp(w));
+  assert.doesNotMatch(d.P2, /summar/i); // UP-2a sends pasted-text summaries to the free model
+  assert.doesNotMatch(d.P1, /greeting|small talk|thanks/i); // UP-2a sends small talk to the free model
+  assert.match(d.F1, /greetings/);
+});
+
+test("UP-10c (lead 2026-11-05): with the tools override P5 is offered and dispatched on a tool turn; without it the listing excludes it", async () => {
+  const toolTurn = (conv) => turn("paid", "buat file lalu jalankan", { conv, extra: { tools: [{ type: "function", function: { name: "run", parameters: { type: "object" } } }] } });
+  const unlisted = structuredClone(policy()); unlisted.models = { ...facts, [MIMO]: { ...facts[MIMO], tools: undefined } };
+  const a = mk(unlisted);
+  a.jev.answer("P6");
+  await a.r.onRoute(toolTurn("t1"));
+  assert.ok(a.logs().at(-1).excluded.some((e) => e.item === "P5" && e.reason === "tools"));
+  const b = mk(); // facts carry tools: true for MIMO, as policy.models does once apply-menu writes the override
+  b.jev.answer("P5", 0.9);
+  const out = await b.r.onRoute(toolTurn("t2"));
+  assert.equal(out.item, "P5");
+  assert.equal(out.models[0], MIMO);
 });

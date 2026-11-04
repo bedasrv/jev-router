@@ -29,3 +29,17 @@ test("UP-10c item 12: every model the menu dispatches has a profile from the ben
   assert.match(profiles["ocpaid/opencode-go/muse-spark-1.3-contributor"].good_at, /coding/);
   assert.match(profiles["ocpaid/opencode-go/deepseek-v4.1-flash"].weak_at, /invent/);
 });
+
+test("profiles (lead 2026-11-05): MiMo-V2.6-Flash is not sold as good at scientific code; Kimi K3.1 Pro is not weak at data analysis", () => {
+  const mf = profiles["ocpaid/opencode-go/mimo-v2.6-flash"], kimi = profiles["ocpaid/opencode-go/kimi-k3.1-pro"];
+  assert.doesNotMatch(mf.good_at, /scientific code/);
+  assert.match(mf.weak_at, /scientific code/);
+  assert.match(mf.good_at, /tools/);
+  assert.doesNotMatch(kimi.weak_at ?? "", /data analysis/);
+});
+
+test("profiles (lead 2026-11-05): P5's tools capability is an override with its staging evidence", () => {
+  const c = profiles._capabilities["ocpaid/opencode-go/mimo-v2.6-flash"];
+  assert.equal(c.tools, true);
+  assert.match(c.evidence, /staging/);
+});

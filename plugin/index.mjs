@@ -108,9 +108,14 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
         const picked = res.ok ? itemById(menu, payload.order[res.index]) : null;
         const conf = res.ok ? Number(res.confidence.toFixed(3)) : undefined;
         const kindOk = kindAllows(picked, res.kind, (res.kind_confidence ?? 0) >= thr);
-        const confident = !!picked && res.confidence >= thr && kindOk;
+        // Lead 2026-11-05: a fresh pick stands at menu.threshold; leaving the conversation's last item still needs
+        // menu.switch_threshold (the stricter rule switches had), so a lower fresh threshold does not make chats jumpy.
+        const switching = !!picked && !!previous && picked.id !== last.id;
+        const need = switching ? Math.max(thr, menu.switch_threshold ?? thr) : thr;
+        const held = switching && res.confidence >= thr && res.confidence < need;
+        const confident = !!picked && res.confidence >= need && kindOk;
         if (confident && cfg.mode === "on") pick = picked;
-        jevInfo = { ok: res.ok, outcome: !res.ok ? "unavailable" : !kindOk && res.confidence >= thr ? "specialist_kind" : !confident ? "unconfident" : cfg.mode === "on" ? "applied" : "shadow",
+        jevInfo = { ok: res.ok, outcome: !res.ok ? "unavailable" : !kindOk && res.confidence >= thr ? "specialist_kind" : held ? "switch_held" : !confident ? "unconfident" : cfg.mode === "on" ? "applied" : "shadow",
           pick: picked?.id, confidence: conf, probabilities: res.ok ? res.probabilities : undefined, order: payload.order,
           ...(kinds && res.ok ? { kind: res.kind, kind_confidence: res.kind_confidence !== undefined ? Number(res.kind_confidence.toFixed(3)) : undefined } : {}),
           source: res.source, jev_model: res.model, latency_ms: res.latency_ms, usage: res.usage, tried: res.tried?.length ? res.tried : undefined };

@@ -31,6 +31,13 @@ if (!args.includes("--no-profiles")) {
     next.models[id] = { ...rest, good_at: p.good_at, ...(p.weak_at ? { weak_at: p.weak_at } : {}), cost: p.cost, ...(p.measured ? { measured: p.measured } : {}) };
     written.push(id.split("/").at(-1));
   }
+  // Capability overrides with their evidence (lead 2026-11-05: P5's tools, verified on staging), over the listing's flags.
+  for (const [id, c] of Object.entries(prof._capabilities ?? {})) {
+    if (id.startsWith("_")) continue;
+    const { evidence, ...caps } = c;
+    next.models[id] = { ...(next.models[id] ?? {}), ...caps, ...(evidence ? { capability_evidence: evidence } : {}) };
+    console.log(`capabilities: ${id.split("/").at(-1)} ${JSON.stringify(caps)}`);
+  }
   const stale = Object.entries(next.models).filter(([id, m]) => m?.good_at && !Object.hasOwn(prof, id)).map(([id]) => id);
   console.log(`profiles: ${written.length} models rewritten (${written.join(", ")})`);
   if (stale.length) console.log(`profiles: still the old text (not in the benchmark table): ${stale.join(", ")}`);

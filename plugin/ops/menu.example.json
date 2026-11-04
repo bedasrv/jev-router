@@ -1,6 +1,7 @@
 {
- "_comment": "UP-10c menu (owner go 2026-11-04). One item = one (model + native thinking) pair Jev may pick. thinking: null = provider default (no field), else {control: effort|toggle, value}. Native values are policy data from effort-pairs-research (audit-code); the ones here are the 2026-10-22 measured levels until that lands. rank: higher = heavier/costlier (stickiness only switches DOWN after sticky.downgrade_after turns Jev rates simpler). backups: tried in order after the head, each with its own thinking. OpenCode Go only (owner 2026-11-04, Addendum 3; menu.allowed_prefixes refuses anything else): the same pair on another of our Go accounts is covered inside each attempt (the ocpaid proxy rotates our Go accounts), then a same-role Go model (Go limits are per model), then P2; free items have beam-free only. gpt-6-luna is not on the menu (owner OK 2026-11-04). Specialists (S*, addendum 2026-11-04) carry requires_metering: true and stay off until menu.metering is true (warslop's pack-metering-per-model); P6's cost cutoff has until_metering: true and stops applying then. A specialist is picked only when Jev is confident about it AND about the task kind (menu.kinds), which must be one of its kinds. S2 (muse-wonder) is left out: it is on OpenRouter only (USD 4 in / 20 out per 1M) and the routers have no OpenRouter connection, so it cannot be dispatched. Specialist thinking is the provider default until effort-pairs-research measures them. S5 passes 1.00x already: set its requires_metering to false once the research confirms its quality. Item descriptions rewritten 2026-11-04 from the per-domain benchmark table (brief item 12), see ops/model-profiles.json. sticky.effort_change_is_switch is true: effort-pairs-research (audit-code, c91d55fb6, in review) measured that changing effort mid-conversation breaks the prompt cache on muse, luna, qwen and minimax, so an effort change waits like a model switch.",
- "threshold": 0.85,
+ "_comment": "UP-10c menu (owner go 2026-11-04). One item = one (model + native thinking) pair Jev may pick. thinking: null = provider default (no field), else {control: effort|toggle, value}. Native values are policy data from effort-pairs-research (audit-code); the ones here are the 2026-10-22 measured levels until that lands. rank: higher = heavier/costlier (stickiness only switches DOWN after sticky.downgrade_after turns Jev rates simpler). backups: tried in order after the head, each with its own thinking. OpenCode Go only (owner 2026-11-04, Addendum 3; menu.allowed_prefixes refuses anything else): the same pair on another of our Go accounts is covered inside each attempt (the ocpaid proxy rotates our Go accounts), then a same-role Go model (Go limits are per model), then P2; free items have beam-free only. gpt-6-luna is not on the menu (owner OK 2026-11-04). Specialists (S*, addendum 2026-11-04) carry requires_metering: true and stay off until menu.metering is true (warslop's pack-metering-per-model); P6's cost cutoff has until_metering: true and stops applying then. A specialist is picked only when Jev is confident about it AND about the task kind (menu.kinds), which must be one of its kinds. S2 (muse-wonder) is left out: it is on OpenRouter only (USD 4 in / 20 out per 1M) and the routers have no OpenRouter connection, so it cannot be dispatched. Specialist thinking is the provider default until effort-pairs-research measures them. S5 passes 1.00x already: set its requires_metering to false once the research confirms its quality. Item descriptions rewritten 2026-11-04 from the per-domain benchmark table (brief item 12), see ops/model-profiles.json. sticky.effort_change_is_switch is true: effort-pairs-research (audit-code, c91d55fb6, in review) measured that changing effort mid-conversation breaks the prompt cache on muse, luna, qwen and minimax, so an effort change waits like a model switch. Lead decisions 2026-11-05 (after the staging NO-GO, docs/NOTES-jev-menu-staging-2026-11-05.md): backups are the reviewed ones again (the same pair on another Go account inside each attempt, a same-role Go item only where one exists, then P2; no model-type backups: P3 never falls back to DeepSeek at high); threshold 0.6 for a fresh pick (unconfident: P2 / F2), switch_threshold 0.85 to leave the conversation's last item (the stricter rule switches kept); P1 and F1 no longer claim 'a single fact', P3 owns facts that must be right; descriptions name only what each pool receives (UP-2a sends greetings, thanks, small talk and pasted-text summaries to the free model).",
+ "threshold": 0.6,
+ "switch_threshold": 0.85,
  "defaults": {
   "paid": "P2",
   "free": "F2"
@@ -52,15 +53,8 @@
     "control": "effort",
     "value": "low"
    },
-   "description": "quick answers with very little thinking: greetings, small talk, a single fact, a short rewrite or translation",
+   "description": "very short replies with very little thinking: a quick acknowledgement, rephrasing, a short rewrite or translation of text the guest gives",
    "backups": [
-    {
-     "model": "ocpaid/opencode-go/muse-spark-1.3-contributor",
-     "thinking": {
-      "control": "effort",
-      "value": "low"
-     }
-    },
     {
      "item": "P2"
     }
@@ -73,13 +67,8 @@
    "rank": 2,
    "model": "ocpaid/opencode-go/deepseek-v4.1-flash",
    "thinking": null,
-   "description": "everyday requests with normal thinking: questions, explanations, summaries and writing, business and knowledge work, long documents",
-   "backups": [
-    {
-     "model": "ocpaid/opencode-go/muse-spark-1.3-contributor",
-     "thinking": null
-    }
-   ]
+   "description": "everyday requests with normal thinking: questions, explanations and writing, business and knowledge work, long documents",
+   "backups": []
   },
   {
    "id": "P3",
@@ -91,15 +80,8 @@
     "control": "effort",
     "value": "high"
    },
-   "description": "careful expert answers where the facts must be right: law, health, science and history; coding, web pages and charts; says plainly when it is unsure and takes its time",
+   "description": "careful expert answers where the facts must be right: history, geography and capitals, names and dates, science, law and health; coding, web pages and charts; says plainly when it is unsure and takes its time",
    "backups": [
-    {
-     "model": "ocpaid/opencode-go/deepseek-v4.1-flash",
-     "thinking": {
-      "control": "effort",
-      "value": "high"
-     }
-    },
     {
      "item": "P2"
     }
@@ -118,13 +100,6 @@
    "description": "hard multi-step reasoning: maths, proofs, puzzles, difficult debugging and careful planning; thinks for a long time before answering",
    "backups": [
     {
-     "model": "ocpaid/opencode-go/muse-spark-1.3-contributor",
-     "thinking": {
-      "control": "effort",
-      "value": "high"
-     }
-    },
-    {
      "item": "P2"
     }
    ]
@@ -138,10 +113,6 @@
    "thinking": null,
    "description": "multi-step work with tools: running code, reading and writing files, step by step tasks over many tool calls",
    "backups": [
-    {
-     "model": "ocpaid/opencode-go/glm-5.3-flash",
-     "thinking": null
-    },
     {
      "item": "P2"
     }
@@ -165,10 +136,6 @@
     "until_metering": true
    },
    "backups": [
-    {
-     "model": "ocpaid/opencode-go/muse-spark-1.3-contributor",
-     "thinking": null
-    },
     {
      "item": "P2"
     }
@@ -251,12 +218,7 @@
    },
    "backups": [
     {
-     "model": "ocpaid/opencode-go/deepseek-v4.1-flash",
-     "thinking": null
-    },
-    {
-     "model": "ocpaid/opencode-go/muse-spark-1.3-contributor",
-     "thinking": null
+     "item": "P2"
     }
    ]
   },
@@ -308,12 +270,7 @@
    },
    "backups": [
     {
-     "model": "ocpaid/opencode-go/deepseek-v4.1-flash",
-     "thinking": null
-    },
-    {
-     "model": "ocpaid/opencode-go/muse-spark-1.3-contributor",
-     "thinking": null
+     "item": "P2"
     }
    ]
   },
@@ -327,7 +284,7 @@
     "control": "effort",
     "value": "low"
    },
-   "description": "quick answers with very little thinking: greetings, small talk, a single fact, a short rewrite or translation",
+   "description": "greetings, thanks, small talk and very short replies with very little thinking: a quick acknowledgement, a short rewrite or translation",
    "backups": [
     {
      "item": "F2"
