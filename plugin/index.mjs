@@ -4,7 +4,8 @@ import { createPolicyLoader } from "./lib/policy.mjs";
 import { createFacts } from "./lib/facts.mjs";
 import { inspectRequest } from "./lib/eligibility.mjs";
 import { buildList, eligibleIds } from "./lib/builder.mjs";
-import { createJev, buildPayload, askText, requestSource } from "./lib/jev.mjs";
+import { createJev, buildPayload, buildMenuPayload, askText, requestSource } from "./lib/jev.mjs";
+import { eligibleItems, attemptsFor, stickyChoice, stickyCfg, itemById, hostThinking, thinkingWord, cachedShare } from "./lib/menu.mjs";
 import { applyThinkingToList, minFallbacks, toHostThinking } from "./lib/thinking.mjs";
 import { createHealth } from "./lib/health.mjs";
 import { conversationKey, isFresh, createSessions, hash, headerValue, isApiSession } from "./lib/sessions.mjs";
@@ -64,6 +65,85 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     return { mode: cfg.mode, promise: p };
   }
 
+  // UP-10c: what each request was sent with, so onRouteResult can say which attempt answered (a backup or the head).
+  const sent = new Map();
+  const remember = (id, rec) => { if (!id) return; if (sent.size >= 2000) sent.delete(sent.keys().next().value); sent.set(id, rec); };
+
+  /**
+   * UP-10c, the menu: one (model + thinking) pair per turn from policy.menu, in both pools. Jev chooses among the
+   * eligible items in one question; a confident pick is weighed against the conversation's last item by the sticky
+   * rules; otherwise the last item stays, else the pool default. Every attempt carries its own native thinking.
+   */
+  async function decideMenu(ctx, { pool, policy, body, req, key, fresh, known, api }) {
+    const menu = policy.menu;
+    const f = factsSrc.get(policy);
+    const deny = policy.denylist ?? [];
+    const { items, excluded } = eligibleItems({ menu, pool, facts: f, req, body, health, deny });
+    if (!items.length) return undefined; // nothing on the menu can answer: OmniRoute's own combo does
+    const ok = new Set(items.map((i) => i.id));
+    const def = itemById(menu, menu.defaults?.[pool]);
+    const fallback = def && ok.has(def.id) ? def : items[0];
+    const last = known?.item ? itemById(menu, known.item) : null;
+    const cfg = policy.jev ?? {};
+    const thr = menu.threshold ?? cfg.threshold ?? 0.85;
+    let choice, jevInfo, pick = null;
+
+    if (!fresh) {
+      // Locked within a turn: a continuation (tool result, agent step) keeps the turn's item without asking Jev.
+      choice = last && ok.has(last.id)
+        ? { item: last, source: "session", reason: "continuation", streak: known.streak ?? 0 }
+        : { item: fallback, source: "default", reason: last ? "continuation_ineligible" : "continuation_unknown", streak: 0 };
+    } else {
+      const skipped = jevSkipped(cfg, ctx.headers);
+      const asking = cfg.mode && cfg.mode !== "off" && !skipped && items.length >= 2;
+      if (asking) {
+        const previous = !api && last ? { item: last.id } : null;
+        const payload = buildMenuPayload({ ask: askText(body), req, items, seed: ctx.requestId ?? askText(body), previous, source: requestSource(ctx.headers, cfg), body });
+        const res = await jevClient.ask(cfg, payload).catch((e) => ({ ok: false, error: String(e?.message ?? e), tried: [] }));
+        const picked = res.ok ? itemById(menu, payload.order[res.index]) : null;
+        const conf = res.ok ? Number(res.confidence.toFixed(3)) : undefined;
+        const confident = !!picked && res.confidence >= thr;
+        if (confident && cfg.mode === "on") pick = picked;
+        jevInfo = { ok: res.ok, outcome: !res.ok ? "unavailable" : !confident ? "unconfident" : cfg.mode === "on" ? "applied" : "shadow",
+          pick: picked?.id, confidence: conf, probabilities: res.ok ? res.probabilities : undefined, order: payload.order,
+          source: res.source, jev_model: res.model, latency_ms: res.latency_ms, usage: res.usage, tried: res.tried?.length ? res.tried : undefined };
+      }
+      // Stateless API calls (session v<voucher>) have no conversation to stick to; each call stands alone.
+      choice = api ? (pick ? { item: pick, source: "jev", reason: "api", streak: 0 } : { item: fallback, source: "default", reason: "api", streak: 0 })
+        : stickyChoice({ last, pick, ok, fallback, streak: known?.streak ?? 0, cfg: stickyCfg(menu) });
+      if (jevInfo && !jevInfo.ok) choice = { ...choice, reason: choice.reason === "unconfident" ? "jev_unavailable" : choice.reason };
+      if (skipped) choice = { ...choice, reason: `${choice.reason}:skip_session` };
+    }
+
+    const { attempts, skipped: skippedTargets, short } = attemptsFor(choice.item, { menu, facts: f, req, deny, health });
+    if (!attempts.length) return undefined;
+    sessions.set(key, { item: choice.item.id, head: attempts[0].model, streak: choice.streak }, now());
+    const models = attempts.map((a) => a.model);
+    const byModel = Object.fromEntries(attempts.map((a) => [a.model, hostThinking(a.thinking)]));
+    const values = new Set(attempts.map((a) => JSON.stringify(a.thinking)));
+    remember(ctx.requestId, { item: choice.item.id, attempts: attempts.map((a) => ({ m: a.model, thinking: thinkingWord(a.thinking), from: a.from })) });
+    log({
+      event: "decision", menu: true, id: ctx.requestId ?? null, pool, conv: hash(key), fresh, est_tokens: req.tokens, tools: req.usesTools, images: req.images,
+      item: choice.item.id, model: attempts[0].model, thinking: thinkingWord(attempts[0].thinking),
+      attempts: attempts.map((a) => ({ m: a.model, thinking: thinkingWord(a.thinking), from: a.from })),
+      source: choice.source, sticky: choice.reason, streak: choice.streak || undefined, last: last?.id,
+      confidence: jevInfo?.confidence, jev: jevInfo, excluded: excluded.length ? excluded : undefined,
+      skipped: skippedTargets.length ? skippedTargets : undefined, short: short || undefined,
+      cached_share: req.tokens ? Math.round(cachedShare(body) * 1000) / 1000 : undefined,
+    });
+    return {
+      models,
+      reason: choice.source === "jev" ? "jev" : !fresh ? "static:cont" : "static",
+      ...(choice.source === "jev" && jevInfo?.confidence !== undefined ? { confidence: jevInfo.confidence } : {}),
+      item: choice.item.id,
+      // Patch 0010: each attempt's own native value. `thinking` stays for a host without 0010 (0008 writes it into the
+      // shared body): the pair's value only when every attempt shares it, else none, so an old host never sends one
+      // model's value to another.
+      thinking_by_model: byModel,
+      thinking: values.size === 1 ? hostThinking(attempts[0].thinking) : { control: "none" },
+    };
+  }
+
   async function decide(ctx) {
     const pool = ctx.model;
     if (!POOLS.has(pool)) return undefined;
@@ -71,6 +151,13 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     if (!policy) return undefined;
     log = createLog(policy.log_file ? path.resolve(path.dirname(policyFile), policy.log_file) : null);
     syncHealth(policy);
+    if (policy.menu) {
+      const body = ctx.body ?? {};
+      const key = conversationKey(ctx.headers, body, policy.jev);
+      const api = isApiSession(headerValue(ctx.headers, policy.jev?.session_header ?? "x-opencode-session"), policy.jev);
+      const fresh = isFresh(body);
+      return decideMenu(ctx, { pool, policy, body, req: inspectRequest(body), key, fresh, known: sessions.get(key, now()), api });
+    }
     const body = ctx.body ?? {};
     const req = inspectRequest(body);
     const key = conversationKey(ctx.headers, body, policy.jev);
@@ -160,7 +247,12 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       const before = Object.keys(health.snapshot()).length;
       health.record(payload);
       const bad = payload.attempts.filter((a) => !a.ok);
-      log({ event: "result", id: payload.requestId ?? null, pool: payload.model, status: payload.status,
+      // UP-10c: which pair answered. The head is attempt 0 of what was sent; any other success is a backup.
+      const was = payload.requestId ? sent.get(payload.requestId) : null;
+      if (was) sent.delete(payload.requestId);
+      const won = [...payload.attempts].reverse().find((a) => a.ok)?.model;
+      const menuInfo = was ? { item: was.item, answered_by: won ?? null, backup_used: won ? won !== was.attempts[0]?.m : undefined, thinking: was.attempts.find((a) => a.m === won)?.thinking } : {};
+      log({ event: "result", id: payload.requestId ?? null, pool: payload.model, status: payload.status, ...menuInfo,
         attempts: payload.attempts.map((a) => ({ m: a.model, ok: a.ok, s: a.status, k: a.kind, ms: a.latencyMs })),
         skipped: payload.skipped?.length ? payload.skipped : undefined,
         cooling: Object.keys(health.snapshot()).length !== before || bad.length ? health.snapshot() : undefined });

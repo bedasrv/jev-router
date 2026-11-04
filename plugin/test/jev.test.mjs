@@ -269,7 +269,7 @@ test("client: failover to the next source, cooldown after three failures, malfor
   const calls = []; let t = 0;
   const fetchImpl = async (url) => { calls.push(url); if (url.endsWith("/a")) return { ok: false, status: 500 }; return answer("c1", { c1: 0.8, c2: 0.2 }); };
   const jev = createJev({ fetchImpl, now: () => (t += 1) });
-  const payload = { ids: ["c1", "c2"], state: {}, questions: {} };
+  const payload = { ids: ["c1", "c2"], state: {}, questions: { model: {}, effort: {} } }; // the model + effort payload (the menu one has no effort)
   const r1 = await jev.ask(cfg(), payload);
   assert.equal(r1.ok, true); assert.equal(r1.source, "b"); assert.equal(r1.tried[0].source, "a");
   await jev.ask(cfg(), payload); await jev.ask(cfg(), payload); // a fails 3x -> cools

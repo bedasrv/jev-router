@@ -57,3 +57,21 @@ test("every plan the example policy can produce reaches the wire intact", () => 
   }
   assert.ok(applied > 0, "the example policy should apply at least one real control");
 });
+
+// Patch 0010: the menu's per-attempt values go through the same normalizer, and the item id must match the host's
+// ITEM_ID (read from the patch), or the host drops the map / the x-router-item header silently.
+test("UP-10c / 0010: every menu pair and item id survives the host unchanged", async () => {
+  const { hostThinking } = await import("../lib/menu.mjs");
+  const menu = JSON.parse(fs.readFileSync(path.join(HERE, "..", "ops", "menu.example.json"), "utf8"));
+  const file = fs.readdirSync(PATCHES).find((f) => f.startsWith("0010-"));
+  assert.ok(file, "patch 0010 not found");
+  const text = fs.readFileSync(path.join(PATCHES, file), "utf8");
+  const re = new RegExp(text.match(/^\+const ITEM_ID = \/(.+)\/;$/m)[1]);
+  assert.ok(text.includes("thinking_by_model"), "0010 reads thinking_by_model");
+  for (const it of menu.items) {
+    assert.ok(re.test(it.id), `item id ${it.id}`);
+    const wire = hostThinking(it.thinking);
+    assert.deepEqual(normalize(wire), wire, `${it.id} ${JSON.stringify(wire)}`);
+    for (const b of it.backups ?? []) if (b.model) assert.deepEqual(normalize(hostThinking(b.thinking)), hostThinking(b.thinking));
+  }
+});

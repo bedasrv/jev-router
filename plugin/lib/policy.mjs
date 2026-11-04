@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { validateThinking } from "./thinking.mjs";
+import { validateMenu } from "./menu.mjs";
 
 // policy.json is data: pool order, per-id facts, denylist, listing sources.
 // Hot-reloaded on mtime; an invalid file keeps the last good one.
@@ -44,6 +45,7 @@ export function validate(p) {
   if (asp !== undefined) { if (typeof asp !== "string") throw new Error("jev.api_session_pattern must be a regular expression"); new RegExp(asp); }
   const mf = p.jev?.min_fallbacks;
   if (mf !== undefined && !(Number.isInteger(mf) && mf >= 0)) throw new Error("jev.min_fallbacks must be a non-negative integer");
+  if (p.menu !== undefined) validateMenu(p.menu); // UP-10c: the (model + thinking) menu
   // Missing thinking is allowed at runtime (unknown = control:none, omit the field); when an
   // entry is present its shape is strict so a typo cannot silently change what goes on the wire.
   for (const [id, m] of Object.entries(p.models ?? {})) {

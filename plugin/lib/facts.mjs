@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { menuTargets } from "./menu.mjs";
 
 // Facts per dispatch id = listing-source data (windows) overlaid by policy.models overrides.
 // Listing sources refresh in the background; the hook path only reads the cache.
@@ -44,7 +45,7 @@ export function createFacts({ fetchImpl = fetch, readFile = (f) => fs.readFileSy
     const out = {};
     const ids = new Set([...policy.order.paid, ...policy.order.free]);
     const loaded = new Set([...listed.keys()].map((k) => k.split("/")[0]));
-    for (const id of [...ids, ...Object.values(policy.last_resort ?? {})]) {
+    for (const id of [...ids, ...Object.values(policy.last_resort ?? {}), ...menuTargets(policy.menu)]) {
       const prefix = id.split("/")[0];
       const isSource = (policy.sources ?? []).some((x) => x.prefix === prefix);
       // a source whose listing has loaded is authoritative: an id it lacks is not dispatchable

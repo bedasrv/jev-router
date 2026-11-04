@@ -145,6 +145,44 @@ export function buildPayload({ ask, req, shown, facts, policy, seed, previous = 
   };
 }
 
+// UP-10c: the menu question. Each option is one (model + thinking) pair from policy.menu, described in the owner's
+// words (item.description); one choice picks both. Options are shuffled per request like the model question, ids are
+// c1..cn, and the conversation's previous item is a named fact so Jev can weigh staying against switching.
+export const MENU_INSTRUCTIONS = {
+  question: "Which option should answer this request?",
+  goal: "The answer must be complete and correct in one pass, without spending more time or thinking than the request needs.",
+  judge: [
+    "what kind of task this is and which option is described for it",
+    "how much reasoning the request really needs",
+    "whether it needs tool use such as running code or working with files",
+    "how much harm a wrong or sloppy answer would do",
+  ],
+  ignore: "how long the answer is asked to be",
+};
+
+export function buildMenuPayload({ ask, req, items, seed, previous = null, source = "chat app", body = null }) {
+  const order = shuffleFor(items.map((i) => i.id), seed);
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const ids = order.map((_, n) => `c${n + 1}`);
+  const criteria = Object.fromEntries(order.map((id, n) => [ids[n], words(byId.get(id).description)]));
+  const prevAt = previous?.item ? order.indexOf(previous.item) : -1;
+  return {
+    ids,
+    order,
+    state: {
+      request: ask,
+      source,
+      system_prompt: (body ? hasSystem(body) : !!req.system) ? "present" : "absent",
+      tools: toolsWord(req.toolCount ?? (req.usesTools ? 1 : 0)),
+      has_image: req.images > 0 ? "yes" : "no",
+      size: sizeWords(req.tokens),
+      ...(previous ? { conversation: "follow-up turn" } : {}),
+      ...(prevAt >= 0 ? { previous_option: ids[prevAt] } : {}),
+    },
+    questions: { model: { type: "choice", instructions: MENU_INSTRUCTIONS, criteria } },
+  };
+}
+
 // (pmax - 1/n) / (1 - 1/n): published exact formula, 1 = all mass on one option, 0 = even split.
 export const confidence = (probs) => {
   const v = Object.values(probs ?? {}).map(Number);
@@ -190,13 +228,15 @@ export function createJev({ fetchImpl = fetch, readFile = (f) => fs.readFileSync
         const a = answers?.model, e = answers?.effort;
         const ids = payload.ids;
         if (!a || !ids.includes(a.choice) || typeof a.probabilities !== "object") throw new Error("malformed model answer");
-        if (!e || !ABSTRACT_LEVELS.includes(e.choice)) throw new Error("malformed effort answer");
+        // The menu payload (UP-10c) asks one question: each option is already a (model + thinking) pair.
+        const wantsEffort = !!payload.questions?.effort;
+        if (wantsEffort && (!e || !ABSTRACT_LEVELS.includes(e.choice))) throw new Error("malformed effort answer");
         health.delete(src.name);
         return {
           ok: true, source: src.name, model, requested_model: src.model, ...(served ? { served_model: served } : {}), latency_ms: now() - ts, ...(usage ? { usage } : {}),
           choice: a.choice, index: ids.indexOf(a.choice), probabilities: a.probabilities, confidence: confidence(a.probabilities),
-          effort: e.choice,
-          ...(e.probabilities && typeof e.probabilities === "object" ? { effort_probabilities: e.probabilities, effort_confidence: confidence(e.probabilities) } : {}),
+          ...(wantsEffort ? { effort: e.choice } : {}),
+          ...(wantsEffort && e.probabilities && typeof e.probabilities === "object" ? { effort_probabilities: e.probabilities, effort_confidence: confidence(e.probabilities) } : {}),
           tried,
         };
       } catch (e) {

@@ -1,0 +1,323 @@
+From c57041a44b98b2b35570911ab037ab94ec4741ee Mon Sep 17 00:00:00 2001
+From: build-router <build-router@warslop-dev>
+Date: Wed, 4 Nov 2026 13:56:53 +0700
+Subject: [PATCH] plugins: per-attempt thinking and menu item provenance
+
+0008 writes one thinking shape into the shared request body before the combo runs, so every fallback attempt carries the head model's value; a plugin that wants each attempt on its own model's native value (jev-router's menu, UP-10c) could only send none or drop backups. onRoute may now return thinking_by_model {<target id>: {control, value}} (same allowlist as 0008, only targets in the final list) and item (a menu id, ^[A-Za-z0-9_-]{1,16}$). With a map, the shared-body write is skipped and the plugin combo's handleSingleModel applies applyPluginRouteThinking(b, pluginAttemptThinking(combo, m)) on each attempt's own body copy; a target the map leaves out gets {control:"none"} (client effort cleared), and the global fallback model is sent with none as well. Without a map, 0008's behaviour is unchanged. buildPluginRouteHeaders adds x-router-item and x-router-thinking (the answering attempt's value, "default" when no field was sent); the 0009 in-band x_omniroute object carries item and thinking too. Unit tests in plugins-onroute and earlyStreamKeepalive.
+---
+ open-sse/utils/earlyStreamKeepalive.ts  |  2 +
+ src/lib/plugins/hooks.ts                |  8 +++
+ src/sse/handlers/chat.ts                | 19 +++++--
+ src/sse/handlers/chat/pluginOnRoute.ts  | 55 ++++++++++++++++++
+ tests/unit/earlyStreamKeepalive.test.ts | 11 ++++
+ tests/unit/plugins-onroute.test.ts      | 75 +++++++++++++++++++++++++
+ 6 files changed, 166 insertions(+), 4 deletions(-)
+
+diff --git a/open-sse/utils/earlyStreamKeepalive.ts b/open-sse/utils/earlyStreamKeepalive.ts
+index 5f67e2e1..3e17133b 100644
+--- a/open-sse/utils/earlyStreamKeepalive.ts
++++ b/open-sse/utils/earlyStreamKeepalive.ts
+@@ -112,6 +112,8 @@ const ROUTE_PROVENANCE_FIELDS: ReadonlyArray<[header: string, key: string]> = [
+   ["x-omniroute-attempts", "attempts"],
+   ["x-router-reason", "reason"],
+   ["x-router-confidence", "confidence"],
++  ["x-router-item", "item"],
++  ["x-router-thinking", "thinking"],
+ ];
+ 
+ /**
+diff --git a/src/lib/plugins/hooks.ts b/src/lib/plugins/hooks.ts
+index 07b5b7e9..66dcb6aa 100644
+--- a/src/lib/plugins/hooks.ts
++++ b/src/lib/plugins/hooks.ts
+@@ -277,6 +277,14 @@ export interface PluginRouteResult {
+   confidence?: number;
+   /** Thinking effort/control to put on the request body (omit to leave the client's body alone). */
+   thinking?: PluginThinkingSelection;
++  /**
++   * Per-attempt thinking, keyed by the target ids in `models`: each attempt gets its own model's native value
++   * written into its own body copy. When present it replaces `thinking` for the body; a target without an
++   * entry is sent with {control:"none"} (any client effort cleared).
++   */
++  thinking_by_model?: Record<string, PluginThinkingSelection>;
++  /** The routing plugin's menu item id (^[A-Za-z0-9_-]{1,16}$); echoed as `x-router-item`. */
++  item?: string;
+ }
+ 
+ export interface PluginResult {
+diff --git a/src/sse/handlers/chat.ts b/src/sse/handlers/chat.ts
+index f5f60b67..db85b1e2 100644
+--- a/src/sse/handlers/chat.ts
++++ b/src/sse/handlers/chat.ts
+@@ -72,6 +72,7 @@ import {
+   buildPluginRouteCombo,
+   emitPluginRouteResult,
+   applyPluginRouteThinking,
++  pluginAttemptThinking,
+   withPluginRouteHeaders,
+ } from "./chat/pluginOnRoute";
+ import { rejectPeerRequest } from "@/shared/resilience/peerRouting";
+@@ -1128,6 +1129,8 @@ async function handleChatImplementation(
+         reason: routed.reason,
+         confidence: routed.confidence,
+         thinking: routed.thinking,
++        thinkingByModel: routed.thinkingByModel,
++        item: routed.item,
+       });
+     }
+   }
+@@ -1139,8 +1142,14 @@ async function handleChatImplementation(
+   telemetry.startPhase("resolve");
+   let combo: any = pluginRouteCombo ?? (await getComboForModel(resolvedModelStr));
+   if (reasoningDecision?.targetCombo) combo = reasoningDecision.targetCombo;
+-  // The plugin's chosen thinking control applies to the body every fallback attempt shares.
+-  if (pluginRouteCombo && combo?.id === pluginRouteCombo.id) {
++  // The plugin's chosen thinking control applies to the body every fallback attempt shares, unless it
++  // sent a per-attempt map (patch 0010): then each attempt writes its own value in handleSingleModel.
++  const pluginPerAttemptThinking = !!(
++    pluginRouteCombo &&
++    combo?.id === pluginRouteCombo.id &&
++    pluginRouteCombo.routeThinkingByModel
++  );
++  if (pluginRouteCombo && combo?.id === pluginRouteCombo.id && !pluginPerAttemptThinking) {
+     body = applyPluginRouteThinking(body, pluginRouteCombo.routeThinking);
+   }
+ 
+@@ -1322,7 +1331,8 @@ async function handleChatImplementation(
+         }
+       ) =>
+         handleSingleModelChat(
+-          b,
++          // Patch 0010: this attempt's own native thinking, on this attempt's own body copy.
++          pluginPerAttemptThinking ? applyPluginRouteThinking(b, pluginAttemptThinking(pluginRouteCombo, m)) : b,
+           m,
+           clientRawRequest,
+           request,
+@@ -1428,7 +1438,8 @@ async function handleChatImplementation(
+         const fallbackResponse = await runWithTransientBackendRetry(
+           () =>
+             handleSingleModelChat(
+-              body,
++              // Patch 0010: per-attempt mode never wrote the shared body; clear any client effort here.
++              pluginPerAttemptThinking ? applyPluginRouteThinking(body, { control: "none" }) : body,
+               fallbackModel,
+               clientRawRequest,
+               request,
+diff --git a/src/sse/handlers/chat/pluginOnRoute.ts b/src/sse/handlers/chat/pluginOnRoute.ts
+index e1467bb6..7a89ccb4 100644
+--- a/src/sse/handlers/chat/pluginOnRoute.ts
++++ b/src/sse/handlers/chat/pluginOnRoute.ts
+@@ -28,6 +28,10 @@ type PluginRouteMetadata = {
+   reason?: string;
+   confidence?: number;
+   thinking?: PluginThinking;
++  /** Per-attempt thinking by target id (patch 0010); replaces `thinking` for the body when present. */
++  thinkingByModel?: Record<string, PluginThinking>;
++  /** The plugin's menu item id, echoed as `x-router-item`. */
++  item?: string;
+ };
+ 
+ /** The plugin's answer after API-key filtering. `reason`/`confidence` are routing provenance. */
+@@ -43,6 +47,8 @@ type PluginRouteComboLike = PluginRouteMetadata & {
+   traceInvocationId?: string;
+   models: Array<{ model: string }>;
+   routeThinking?: PluginThinking;
++  routeThinkingByModel?: Record<string, PluginThinking>;
++  routeItem?: string;
+ };
+ 
+ export const MAX_PLUGIN_ROUTE_MODELS = 12;
+@@ -60,6 +66,42 @@ function normalizePluginThinking(value: unknown): PluginThinking | null {
+   return { control, value: text };
+ }
+ 
++const ITEM_ID = /^[A-Za-z0-9_-]{1,16}$/;
++
++/** A menu item id, or null: never echoed unless it is a short plain token. */
++function normalizeRouteItem(value: unknown): string | null {
++  return typeof value === "string" && ITEM_ID.test(value) ? value : null;
++}
++
++/**
++ * Per-attempt thinking: only targets that are in the final model list, each through the same allowlist
++ * as `thinking`. A malformed entry is dropped (that attempt then gets {control:"none"}). Null when the
++ * plugin sent no usable map, so the single-`thinking` behaviour of 0008 stays.
++ */
++function normalizeThinkingByModel(value: unknown, models: string[]): Record<string, PluginThinking> | null {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
++  const out: Record<string, PluginThinking> = {};
++  for (const model of models) {
++    if (!Object.prototype.hasOwnProperty.call(value, model)) continue;
++    const t = normalizePluginThinking((value as Record<string, unknown>)[model]);
++    if (t) out[model] = t;
++  }
++  return Object.keys(out).length ? out : null;
++}
++
++/**
++ * The thinking one attempt of a plugin-routed combo carries: its own entry when the plugin sent a
++ * per-attempt map, {control:"none"} for a target the map leaves out, or the shared selection (0008).
++ */
++export function pluginAttemptThinking(
++  combo: PluginRouteComboLike | null | undefined,
++  model: string
++): PluginThinking | undefined {
++  if (!combo) return undefined;
++  if (combo.routeThinkingByModel) return combo.routeThinkingByModel[model] ?? { control: "none" };
++  return combo.routeThinking;
++}
++
+ export async function runPluginOnRouteHook(args: {
+   requestId: string;
+   body: unknown;
+@@ -99,11 +141,15 @@ export async function runPluginOnRouteHook(args: {
+       `onRoute: ${args.model} → [${models.join(", ")}]${result.reason ? ` (${result.reason})` : ""}`
+     );
+     const thinking = normalizePluginThinking(result.thinking);
++    const thinkingByModel = normalizeThinkingByModel(result.thinking_by_model, models);
++    const item = normalizeRouteItem(result.item);
+     return {
+       models,
+       ...(typeof result.reason === "string" ? { reason: result.reason } : {}),
+       ...(typeof result.confidence === "number" ? { confidence: result.confidence } : {}),
+       ...(thinking ? { thinking } : {}),
++      ...(thinkingByModel ? { thinkingByModel } : {}),
++      ...(item ? { item } : {}),
+     };
+   } catch (err) {
+     args.log?.debug?.(
+@@ -140,6 +186,8 @@ export function buildPluginRouteCombo(
+     routeReason: typeof metadata.reason === "string" ? metadata.reason : undefined,
+     routeConfidence: typeof metadata.confidence === "number" ? metadata.confidence : undefined,
+     routeThinking: normalizePluginThinking(metadata.thinking) ?? undefined,
++    routeThinkingByModel: normalizeThinkingByModel(metadata.thinkingByModel, models) ?? undefined,
++    routeItem: normalizeRouteItem(metadata.item) ?? undefined,
+     isHidden: true,
+     isActive: true,
+     sortOrder: 0,
+@@ -233,6 +281,13 @@ export function buildPluginRouteHeaders(
+     const confidence = reason === "jev" ? normalizeRouteConfidence(combo.routeConfidence) : null;
+     if (confidence) headers["x-router-confidence"] = confidence;
+   }
++  // Patch 0010: the plugin's menu item, and the thinking the ANSWERING attempt carried ("default" = no field).
++  const item = normalizeRouteItem(combo.routeItem);
++  if (item) headers["x-router-item"] = item;
++  if (combo.routeThinkingByModel || combo.routeThinking) {
++    const t = pluginAttemptThinking(combo, target);
++    headers["x-router-thinking"] = t && t.control !== "none" && t.value ? t.value : "default";
++  }
+   return headers;
+ }
+ 
+diff --git a/tests/unit/earlyStreamKeepalive.test.ts b/tests/unit/earlyStreamKeepalive.test.ts
+index 172b8482..6c4a15d8 100644
+--- a/tests/unit/earlyStreamKeepalive.test.ts
++++ b/tests/unit/earlyStreamKeepalive.test.ts
+@@ -210,3 +210,14 @@ test("the provenance frame carries only the allowlisted routing headers", () =>
+   assert.deepEqual(Object.keys(chunk.x_omniroute).sort(), ["attempts", "confidence", "reason", "route"]);
+   assert.equal(openAiRouteProvenanceFrame(new Headers({ "x-router-reason": "static" })), null);
+ });
++
++test("0010: the in-band provenance frame carries the menu item and the answering attempt's thinking", async () => {
++  const delayed = new Promise<Response>((resolve) => setTimeout(() => resolve(routed({
++    "x-omniroute-route": "ocpaid/opencode-go/muse-spark-1.3-contributor", "x-omniroute-attempts": "1",
++    "x-router-reason": "jev", "x-router-confidence": "0.91", "x-router-item": "P3", "x-router-thinking": "high",
++  })), 60));
++  const result = await withEarlyStreamKeepalive(delayed, { thresholdMs: 10, intervalMs: 1000, provenanceFrame: openAiRouteProvenanceFrame });
++  const text = await drainStream(result.body!);
++  const meta = text.split("\n\n").filter((f) => f.startsWith("data: {")).map((f) => JSON.parse(f.slice(6))).find((c) => c.x_omniroute);
++  assert.deepEqual(meta?.x_omniroute, { route: "ocpaid/opencode-go/muse-spark-1.3-contributor", attempts: "1", reason: "jev", confidence: "0.91", item: "P3", thinking: "high" });
++});
+diff --git a/tests/unit/plugins-onroute.test.ts b/tests/unit/plugins-onroute.test.ts
+index 0f9291eb..4135c2aa 100644
+--- a/tests/unit/plugins-onroute.test.ts
++++ b/tests/unit/plugins-onroute.test.ts
+@@ -21,6 +21,7 @@ import {
+   buildPluginRouteCombo,
+   buildPluginRouteHeaders,
+   emitPluginRouteResult,
++  pluginAttemptThinking,
+   runPluginOnRouteHook,
+   withPluginRouteHeaders,
+   MAX_PLUGIN_ROUTE_MODELS,
+@@ -230,3 +231,77 @@ test("emitPluginRouteResult swallows a throwing handler and a missing trace", as
+   assert.doesNotThrow(() => emitPluginRouteResult({ requestId: "r7", requestedModel: "free", combo, response: { status: 502 } }));
+   await new Promise((r) => setTimeout(r, 30));
+ });
++
++// ── patch 0010: per-attempt thinking and menu item provenance ──
++
++test("0010: runPluginOnRouteHook keeps a per-attempt thinking map for listed targets only, and a plain item id", async () => {
++  registerHook("onRoute", "p", () => ({
++    models: ["a/x", "b/y"], reason: "jev", confidence: 0.9, item: "P3",
++    thinking: { control: "none" },
++    thinking_by_model: { "a/x": { control: "effort", value: "high" }, "b/y": { control: "none" }, "z/not-listed": { control: "effort", value: "max" }, },
++  }), 1);
++  const out = await runPluginOnRouteHook({ requestId: "r20", body: {}, model: "paid", apiKeyInfo: null });
++  assert.deepEqual(out?.thinkingByModel, { "a/x": { control: "effort", value: "high" }, "b/y": { control: "none" } });
++  assert.equal(out?.item, "P3");
++});
++
++test("0010: malformed per-attempt entries and item ids are dropped, never echoed", async () => {
++  registerHook("onRoute", "p", () => ({
++    models: ["a/x", "b/y"], item: "P3\r\nx-evil: 1",
++    thinking_by_model: { "a/x": { control: "toggle", value: "high" }, "b/y": { control: "effort", value: "x".repeat(40) } },
++  }), 1);
++  const out = await runPluginOnRouteHook({ requestId: "r21", body: {}, model: "paid", apiKeyInfo: null });
++  assert.equal(out?.thinkingByModel, undefined);
++  assert.equal(out?.item, undefined);
++});
++
++test("0010: each attempt gets its own model's value; a target the map leaves out is sent with none; no map = 0008", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x", "b/y", "c/z"], "r22", {
++    thinking: { control: "effort", value: "low" },
++    thinkingByModel: { "a/x": { control: "effort", value: "low" }, "b/y": { control: "toggle", value: "on" } },
++  });
++  assert.deepEqual(pluginAttemptThinking(combo, "a/x"), { control: "effort", value: "low" });
++  assert.deepEqual(pluginAttemptThinking(combo, "b/y"), { control: "toggle", value: "on" });
++  assert.deepEqual(pluginAttemptThinking(combo, "c/z"), { control: "none" });
++  const client = { model: "paid", reasoning_effort: "high", messages: [] };
++  assert.deepEqual(applyPluginRouteThinking(client, pluginAttemptThinking(combo, "a/x")), { model: "paid", reasoning_effort: "low", messages: [] });
++  assert.deepEqual(applyPluginRouteThinking(client, pluginAttemptThinking(combo, "b/y")), { model: "paid", messages: [], thinking: { type: "enabled" } });
++  assert.deepEqual(applyPluginRouteThinking(client, pluginAttemptThinking(combo, "c/z")), { model: "paid", messages: [] });
++  assert.equal(client.reasoning_effort, "high", "the shared body is never mutated");
++  const old = buildPluginRouteCombo("paid", ["a/x", "b/y"], "r23", { thinking: { control: "effort", value: "high" } });
++  assert.equal(old.routeThinkingByModel, undefined);
++  assert.deepEqual(pluginAttemptThinking(old, "b/y"), { control: "effort", value: "high" });
++});
++
++test("0010: headers name the item and the thinking of the attempt that answered", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x", "b/y"], "r24", {
++    reason: "jev", confidence: 0.9, item: "P3",
++    thinkingByModel: { "a/x": { control: "effort", value: "high" }, "b/y": { control: "none" } },
++  });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, { target: "a/x", ok: false, status: 503, kind: "provider", latencyMs: 50 });
++  recordComboOutcome(id, { target: "b/y", ok: true, status: 200, kind: null, latencyMs: 700 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "b/y",
++    "x-omniroute-attempts": "2",
++    "x-router-reason": "jev",
++    "x-router-confidence": "0.9",
++    "x-router-item": "P3",
++    "x-router-thinking": "default",
++  });
++  const head = buildPluginRouteCombo("paid", ["a/x"], "r25", { reason: "static", item: "P4", thinkingByModel: { "a/x": { control: "effort", value: "max" } } });
++  const hid = String(head.traceInvocationId);
++  startComboTrace(hid, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(hid, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 100 });
++  assert.equal(buildPluginRouteHeaders(head)["x-router-thinking"], "max");
++  assert.equal(buildPluginRouteHeaders(head)["x-router-item"], "P4");
++});
++
++test("0010: a plugin that sends neither item nor thinking gets the 0007 headers unchanged", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x"], "r26", { reason: "static" });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 100 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), { "x-omniroute-route": "a/x", "x-omniroute-attempts": "1", "x-router-reason": "static" });
++});
+-- 
+2.47.3
+
