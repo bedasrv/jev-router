@@ -67,7 +67,7 @@
    "rank": 2,
    "model": "ocpaid/opencode-go/deepseek-v4.1-flash",
    "thinking": null,
-   "description": "everyday requests with normal thinking: questions, explanations and writing, business and knowledge work, long documents",
+   "description": "everyday requests with normal thinking: ideas and suggestions, messages, captions, poems and stories, everyday topics such as food, drinks, home life and money basics, long documents",
    "backups": []
   },
   {
@@ -80,7 +80,7 @@
     "control": "effort",
     "value": "high"
    },
-   "description": "careful expert answers where the facts must be right: history, geography and capitals, names and dates, science, law and health; coding, web pages and charts; says plainly when it is unsure and takes its time",
+   "description": "careful expert answers where the facts must be right: history and dates, geography and capitals, famous people, science and why things happen in nature, law and official rules, health and medicines; coding, web pages and charts; says plainly when it is unsure and takes its time",
    "backups": [
     {
      "item": "P2"
@@ -125,7 +125,7 @@
    "rank": 2,
    "model": "ocpaid/opencode-go/glm-5.3-flash",
    "thinking": null,
-   "description": "business and IT work: reports, spreadsheets and office documents, diagnosing IT problems, computer security, everyday code",
+   "description": "business and IT work for a shop or an office: promotion plans, prices, costs and margins, reports, stock and sales records, spreadsheets, procedures for staff, diagnosing computers, networks and Wi-Fi, computer security, everyday code",
    "prices": {
     "in": 0.15,
     "cached": 0.03,
@@ -298,7 +298,7 @@
    "rank": 2,
    "model": "ocpaid/opencode-go/beam-free",
    "thinking": null,
-   "description": "everyday chat and questions with normal thinking: explanations, writing and summaries, following instructions exactly",
+   "description": "everyday chat with normal thinking: messages, stories and short writing, ideas and tips, meanings of words and sayings, summaries, following instructions exactly",
    "backups": []
   },
   {
@@ -311,7 +311,7 @@
     "control": "effort",
     "value": "high"
    },
-   "description": "requests that need careful step by step reasoning: maths, logic, science questions, tricky code; thinks longer before answering",
+   "description": "careful step by step reasoning: arithmetic and maths with numbers, counting days and time, logic and riddles, why things happen in science and nature, finding bugs in code; works through each step before answering",
    "backups": [
     {
      "item": "F2"
