@@ -1,4 +1,4 @@
-From 4e679457d33b4c7dc740722505ffca8da38c4a6a Mon Sep 17 00:00:00 2001
+From 19f277f2602f6710c358aead46dedfa7ecf51e28 Mon Sep 17 00:00:00 2001
 From: bedasrv <bedasrv@warslop-dev>
 Date: Sun, 8 Nov 2026 20:36:56 +0700
 Subject: [PATCH] plugins: onRoute + onRouteResult re-authored for upstream
@@ -37,7 +37,7 @@ core typecheck clean.
  src/app/api/v1/chat/completions/route.ts      |   2 +
  src/lib/plugins/hooks.ts                      |  96 +++
  src/lib/plugins/index.ts                      |   9 +-
- src/lib/plugins/loader.ts                     |  11 +-
+ src/lib/plugins/loader.ts                     |  49 +-
  src/lib/plugins/manager.ts                    |   4 +
  src/lib/plugins/manifest.ts                   |   6 +
  src/lib/plugins/pluginRegistration.ts         |   2 +
@@ -48,7 +48,7 @@ core typecheck clean.
  tests/unit/per-route-window.test.ts           | 266 ++++++++
  tests/unit/plugins-onroute.test.ts            | 605 ++++++++++++++++++
  tests/unit/plugins-welcome-banner-e2e.test.ts |   3 +
- 18 files changed, 1762 insertions(+), 11 deletions(-)
+ 18 files changed, 1799 insertions(+), 12 deletions(-)
  create mode 100644 src/sse/handlers/chat/pluginOnRoute.ts
  create mode 100644 tests/unit/per-route-window.test.ts
  create mode 100644 tests/unit/plugins-onroute.test.ts
@@ -502,10 +502,25 @@ index 656116f0..d177f089 100644
      const existed = hasHooks();
      unregisterHooks(name);
 diff --git a/src/lib/plugins/loader.ts b/src/lib/plugins/loader.ts
-index 71e9223b..b67a090a 100644
+index 71e9223b..0500622e 100644
 --- a/src/lib/plugins/loader.ts
 +++ b/src/lib/plugins/loader.ts
-@@ -32,7 +32,7 @@ const SIGKILL_GRACE_MS = 3_000;
+@@ -17,7 +17,13 @@ import { tmpdir } from "os";
+ import { randomUUID, createHash } from "crypto";
+ import { logger } from "../../../open-sse/utils/logger.ts";
+ import type { PluginManifestWithDefaults, Permission } from "./manifest";
+-import type { Plugin, PluginContext, PluginResult } from "./index";
++import type {
++  Plugin,
++  PluginContext,
++  PluginResult,
++  PluginRouteContext,
++  PluginRouteResult,
++} from "./index";
+ 
+ const log = logger("PLUGIN_LOADER");
+ 
+@@ -32,7 +38,7 @@ const SIGKILL_GRACE_MS = 3_000;
  // plugin dead-but-shown-active until a manual deactivate/activate. Blocking hooks
  // (onRequest/onResponse/onError) and the rarely-fired lifecycle hooks keep the
  // kill-on-timeout isolation semantics.
@@ -514,7 +529,58 @@ index 71e9223b..b67a090a 100644
  
  // #8395: stdout/stderr forwarding hygiene — cap how much of a plugin's own console
  // output we relay per stream, so a runaway/misbehaving plugin can't flood memory or
-@@ -391,7 +391,13 @@ export async function loadPlugin(
+@@ -306,6 +312,12 @@ export async function loadPlugin(
+   // Call a hook in the child process with a timeout. Blocking/lifecycle hooks escalate
+   // SIGTERM → SIGKILL on timeout; NOTIFICATION_HOOKS only drop the pending call.
+   const callHook = (hook: string, payload: unknown, timeout = hookTimeoutMs): Promise<unknown> => {
++    // A dead child (killed after a hook timeout, crashed, exited) is never respawned here, and
++    // child.send() on a closed channel would otherwise sit out the full hook timeout on EVERY
++    // later request. Fail fast so the registered hook stays fail-open without the stall.
++    if (child.exitCode !== null || child.signalCode !== null || !child.connected) {
++      return Promise.reject(new Error(`Plugin '${manifest.name}' process is not running`));
++    }
+     return new Promise((resolve, reject) => {
+       const id = String(++callCounter);
+       const timer = setTimeout(() => {
+@@ -343,6 +355,15 @@ export async function loadPlugin(
+ 
+   const registeredHooks: string[] = [];
+ 
++  // onRoute runs on the request path before any model is chosen: bound it tighter than the
++  // generic hook timeout (override with OMNIROUTE_PLUGIN_ONROUTE_TIMEOUT_MS).
++  const onRouteTimeoutMs = Math.min(
++    hookTimeoutMs,
++    Number(process.env.OMNIROUTE_PLUGIN_ONROUTE_TIMEOUT_MS) > 0
++      ? Number(process.env.OMNIROUTE_PLUGIN_ONROUTE_TIMEOUT_MS)
++      : 5000
++  );
++
+   if (manifest.hooks.onRequest) {
+     plugin.onRequest = async (ctx: PluginContext): Promise<PluginResult | void> => {
+       try {
+@@ -358,6 +379,21 @@ export async function loadPlugin(
+     registeredHooks.push("onRequest");
+   }
+ 
++  if (manifest.hooks.onRoute) {
++    plugin.onRoute = async (ctx: PluginRouteContext): Promise<PluginRouteResult | void> => {
++      try {
++        const result = await callHook("onRoute", ctx, onRouteTimeoutMs);
++        return result as PluginRouteResult | void;
++      } catch (err: unknown) {
++        log.error("plugin.onRoute_error", {
++          name: manifest.name,
++          error: err instanceof Error ? err.message : String(err),
++        });
++      }
++    };
++    registeredHooks.push("onRoute");
++  }
++
+   if (manifest.hooks.onResponse) {
+     plugin.onResponse = async (ctx: PluginContext, response: unknown): Promise<unknown | void> => {
+       try {
+@@ -391,7 +427,13 @@ export async function loadPlugin(
    // applies. Without this branch the event fires into an empty registry and is dropped
    // for every disk-installed plugin (#11825).
    const lifecycleHooks: Array<{
@@ -529,7 +595,7 @@ index 71e9223b..b67a090a 100644
      manifestFlag: boolean;
    }> = [
      { key: "onInstall", manifestFlag: manifest.hooks.onInstall },
-@@ -399,6 +405,7 @@ export async function loadPlugin(
+@@ -399,6 +441,7 @@ export async function loadPlugin(
      { key: "onDeactivate", manifestFlag: manifest.hooks.onDeactivate },
      { key: "onUninstall", manifestFlag: manifest.hooks.onUninstall },
      { key: "onStreamComplete", manifestFlag: manifest.hooks.onStreamComplete },
