@@ -1,0 +1,2217 @@
+From 4e679457d33b4c7dc740722505ffca8da38c4a6a Mon Sep 17 00:00:00 2001
+From: bedasrv <bedasrv@warslop-dev>
+Date: Sun, 8 Nov 2026 20:36:56 +0700
+Subject: [PATCH] plugins: onRoute + onRouteResult re-authored for upstream
+ v3.8.53
+
+Replaces the v3.8.52-era patches 0001/0002 and 0007-0011 with a single
+v3.8.53-native patch built against upstream v3.8.53 (where the plugin/hook
+system was rewritten: emitHook/emitHookBlocking/HookHandler generics,
+BUILTIN_EVENTS pinned by plugins-welcome-banner-e2e, decisionTrace and
+executeTargetAttempt reworked).
+
+Kept contract, re-implemented:
+- onRoute: pre-resolution hook; a plugin's answer (an ordered list of
+  model ids) becomes an in-memory priority combo (maxRetries 0) dispatched
+  through the existing combo machinery, so per-target policy, cooldowns and
+  fallback all apply. Fail-open.
+- onRouteResult: one-way notification per dispatched attempt with status
+  and allowlisted kind (auth|rate_limit|timeout|provider|model|quality) and
+  isUsageLimitError (spent allowance).
+- x-omniroute-route/attempts, x-router-reason/confidence/item/specialist/
+  thinking on the response head; context_length/max_output_tokens when
+  known for the answering attempt.
+- earlyStreamKeepalive carries the same provenance in-band when the head
+  was committed early (openAiRouteProvenanceFrame on /v1/chat/completions).
+- Partial-routing-preserving defaults: unknown windows stay absent, never
+  guessed.
+
+Tests: per-route-window, plugins-onroute, earlyStreamKeepalive,
+plugins-welcome-banner-e2e; combo suite green (2271 pass), open-sse and
+core typecheck clean.
+---
+ .../services/combo/comboErrorAggregation.ts   |  14 +
+ open-sse/services/combo/decisionTrace.ts      |  30 +
+ .../services/combo/executeTargetAttempt.ts    |  46 +-
+ open-sse/utils/earlyStreamKeepalive.ts        |  51 ++
+ src/app/api/v1/chat/completions/route.ts      |   2 +
+ src/lib/plugins/hooks.ts                      |  96 +++
+ src/lib/plugins/index.ts                      |   9 +-
+ src/lib/plugins/loader.ts                     |  11 +-
+ src/lib/plugins/manager.ts                    |   4 +
+ src/lib/plugins/manifest.ts                   |   6 +
+ src/lib/plugins/pluginRegistration.ts         |   2 +
+ src/lib/plugins/sdk.ts                        |  22 +-
+ src/sse/handlers/chat.ts                      |  55 +-
+ src/sse/handlers/chat/pluginOnRoute.ts        | 432 +++++++++++++
+ tests/unit/earlyStreamKeepalive.test.ts       | 119 +++-
+ tests/unit/per-route-window.test.ts           | 266 ++++++++
+ tests/unit/plugins-onroute.test.ts            | 605 ++++++++++++++++++
+ tests/unit/plugins-welcome-banner-e2e.test.ts |   3 +
+ 18 files changed, 1762 insertions(+), 11 deletions(-)
+ create mode 100644 src/sse/handlers/chat/pluginOnRoute.ts
+ create mode 100644 tests/unit/per-route-window.test.ts
+ create mode 100644 tests/unit/plugins-onroute.test.ts
+
+diff --git a/open-sse/services/combo/comboErrorAggregation.ts b/open-sse/services/combo/comboErrorAggregation.ts
+index 5b4f095e..2d03b06c 100644
+--- a/open-sse/services/combo/comboErrorAggregation.ts
++++ b/open-sse/services/combo/comboErrorAggregation.ts
+@@ -57,6 +57,20 @@ const KIND_LABELS: Record<ComboOutcomeKind, string> = {
+  * lumping it into `model` would make `resolveComboTerminalStatus` treat a
+  * heterogeneous 429 mix as a genuinely-invalid-request case by accident.
+  */
++const USAGE_LIMIT_TEXT =
++  /usage.?limit|limit (has been )?reached|quota|allowance|exceeded your|insufficient (balance|credit|quota)|subscribe to opencode go/i;
++
++/**
++ * Whether an error body is a provider-side usage/allowance refusal (a model's monthly/5-hour Go
++ * allowance is spent, or the free-tier usage limit is hit) rather than a short rate limit: the
++ * model will not answer again until its allowance resets, whatever the backoff is. 401/403 with an
++ * auth-sounding body does NOT qualify (that is `auth`), and neither does a bare 429.
++ */
++export function isUsageLimitError(status: number | null | undefined, errorText: unknown): boolean {
++  if (status !== 429 && status !== 402 && status !== 403) return false;
++  return typeof errorText === "string" && USAGE_LIMIT_TEXT.test(errorText);
++}
++
+ export function classifyComboOutcome(status: number, errorText: string): ComboOutcomeKind {
+   const text = typeof errorText === "string" ? errorText : "";
+   if (
+diff --git a/open-sse/services/combo/decisionTrace.ts b/open-sse/services/combo/decisionTrace.ts
+index c504e462..04785fa0 100644
+--- a/open-sse/services/combo/decisionTrace.ts
++++ b/open-sse/services/combo/decisionTrace.ts
+@@ -80,6 +80,23 @@ export const AUTO_EVALUATION_STAGES = [
+ 
+ export type AutoEvaluationStage = (typeof AUTO_EVALUATION_STAGES)[number];
+ 
++/**
++ * Per-attempt result of a dispatched target. Routing metadata only (same safety contract as the
++ * decisions above): the HTTP status and the allowlisted classification, never an error body.
++ */
++export interface ComboOutcomeEntry {
++  /** "<provider>/<model>" as dispatched. */
++  target: string;
++  ok: boolean;
++  status: number | null;
++  /** classifyComboOutcome kind (auth | rate_limit | timeout | provider | model | quality | skipped | upstream); null on success. */
++  kind: string | null;
++  /** Patch 0010: the failure was a spent per-model allowance (isUsageLimitError), not a short rate limit. */
++  limit?: boolean;
++  latencyMs: number;
++  ts: number;
++}
++
+ export interface AutoEvaluationCandidate {
+   target: string;
+   provider: string;
+@@ -108,6 +125,8 @@ export interface ComboTrace {
+   strategy: string | null;
+   comboName: string | null;
+   decisions: ComboTraceEntry[];
++  /** Per-attempt outcomes, recorded at each dispatched attempt (success and failure alike). */
++  outcomes: ComboOutcomeEntry[];
+   autoEvaluation: AutoEvaluationTrace | null;
+   terminal: { status: number | null; errorClass: string | null } | null;
+ }
+@@ -227,6 +246,7 @@ export function startComboTrace(
+       strategy: meta.strategy ?? null,
+       comboName: meta.comboName ?? null,
+       decisions: [],
++      outcomes: [],
+       autoEvaluation: null,
+       terminal: null,
+     });
+@@ -257,6 +277,16 @@ export function recordComboDecision(
+   });
+ }
+ 
++/** Record the HTTP-level result of one dispatched attempt (called for every attempt, success or failure). */
++export function recordComboOutcome(
++  invocationId: string,
++  entry: Omit<ComboOutcomeEntry, "ts">
++): void {
++  const trace = traces.get(invocationId);
++  if (!trace) return;
++  trace.outcomes.push({ ...entry, ts: Date.now() });
++}
++
+ /** One skip reason's targets, for the ALL_TARGETS_SKIPPED diagnostics body. */
+ export interface SkippedTargetGroup {
+   reason: ComboSkipReason;
+diff --git a/open-sse/services/combo/executeTargetAttempt.ts b/open-sse/services/combo/executeTargetAttempt.ts
+index 0a691ffe..a4526535 100644
+--- a/open-sse/services/combo/executeTargetAttempt.ts
++++ b/open-sse/services/combo/executeTargetAttempt.ts
+@@ -74,7 +74,7 @@ import { isInstanceDraining as isDraining } from "../../utils/drainStatus.ts";
+ import { applyComboTargetExhaustion } from "./targetExhaustion.ts";
+ import { buildBudgetExhaustedResponse } from "./budgetExhaustion.ts";
+ import { advanceNativeCodexTurnGeneration, pinNativeCodexTurn } from "./nativeCodexTurnPin.ts";
+-import { recordComboDecision } from "./decisionTrace.ts";
++import { recordComboDecision, recordComboOutcome } from "./decisionTrace.ts";
+ import { recordProviderCooldown } from "../providerCooldownTracker.ts";
+ import {
+   validateResponseQuality,
+@@ -93,7 +93,11 @@ import {
+   recordQuotaExhaustionClassification,
+ } from "./quotaExhaustion.ts";
+ import { markAccountExhaustedFromCredits } from "../../../src/domain/quotaCache.ts";
+-import { classifyComboOutcome, redactConnectionLabel } from "./comboErrorAggregation.ts";
++import {
++  classifyComboOutcome,
++  isUsageLimitError,
++  redactConnectionLabel,
++} from "./comboErrorAggregation.ts";
+ import { resolveRetryCooldownWait, waitForAuthorizedRetry } from "./authorizedRetryWait.ts";
+ import { recordLkgpPin } from "./recordLkgpPin.ts";
+ import {
+@@ -357,6 +361,7 @@ export async function executeTargetAttempt(
+       }
+       if (state.comboExpired || targetSignal?.aborted) return null;
+     }
++    const attemptStartedAt = Date.now();
+     const result = await deps.handleSingleModelWithTimeout(attemptBody, modelStr, {
+       ...targetForAttempt,
+       emptyTurnConnectionId,
+@@ -453,6 +458,13 @@ export async function executeTargetAttempt(
+           error: quality.reason || "upstream response failed quality validation",
+           kind: qualityFailure.kind,
+         });
++        recordComboOutcome(deps.traceInvocationId, {
++          target: modelStr,
++          ok: false,
++          status: qualityFailure.status,
++          kind: String(qualityFailure.kind),
++          latencyMs: Date.now() - attemptStartedAt,
++        });
+         state.fallbackCount++;
+         state.requestScopedFailureSeen ||= qualityFailure.requestScoped;
+         if (qualityFailure.requestScoped)
+@@ -586,6 +598,13 @@ export async function executeTargetAttempt(
+       }
+ 
+       const latencyMs = Date.now() - deps.startTime;
++      recordComboOutcome(deps.traceInvocationId, {
++        target: modelStr,
++        ok: true,
++        status: result.status,
++        kind: null,
++        latencyMs: Date.now() - attemptStartedAt,
++      });
+       emit("combo.target.succeeded", {
+         comboName: deps.combo.name,
+         targetIndex: i,
+@@ -804,6 +823,13 @@ export async function executeTargetAttempt(
+       state.lastError = refusal.error;
+       state.lastStatus = refusal.status;
+       state.comboErrors.push(refusal.outcome);
++      recordComboOutcome(deps.traceInvocationId, {
++        target: modelStr,
++        ok: false,
++        status: refusal.outcome.status,
++        kind: String(refusal.outcome.kind),
++        latencyMs: Date.now() - attemptStartedAt,
++      });
+       state.fallbackCount++;
+       return null;
+     }
+@@ -1028,6 +1054,14 @@ export async function executeTargetAttempt(
+         kind: classifyComboOutcome(result.status, errorText),
+         code: structuredError?.code,
+       });
++      recordComboOutcome(deps.traceInvocationId, {
++        target: modelStr,
++        ok: false,
++        status: result.status,
++        kind: String(classifyComboOutcome(result.status, errorText)),
++        ...(isUsageLimitError(result.status, errorText) ? { limit: true } : {}),
++        latencyMs: Date.now() - attemptStartedAt,
++      });
+       state.lastStatus = result.status;
+       // Terminal stop ("stopping combo"): no later target is tried, so this is not
+       // a fallback even when the failing target is not the first one.
+@@ -1277,6 +1311,14 @@ export async function executeTargetAttempt(
+       kind: classifyComboOutcome(result.status, errorText),
+       code: structuredError?.code,
+     });
++    recordComboOutcome(deps.traceInvocationId, {
++      target: modelStr,
++      ok: false,
++      status: result.status,
++      kind: String(classifyComboOutcome(result.status, errorText)),
++      latencyMs: Date.now() - attemptStartedAt,
++      ...(isUsageLimitError(result.status, errorText) ? { limit: true } : {}),
++    });
+     state.lastStatus = result.status;
+     state.fallbackCount++;
+     // Wire combo failures into the resilience dashboard (model-level lockout)
+diff --git a/open-sse/utils/earlyStreamKeepalive.ts b/open-sse/utils/earlyStreamKeepalive.ts
+index ac83438d..59087c75 100644
+--- a/open-sse/utils/earlyStreamKeepalive.ts
++++ b/open-sse/utils/earlyStreamKeepalive.ts
+@@ -108,6 +108,40 @@ export const OPENAI_RESPONSES_ERROR_FRAME = ENCODER.encode(
+   })}\n\n`
+ );
+ 
++/**
++ * Route provenance headers a plugin-routed combo stamps on its response, and the key each one
++ * takes in the in-band frame. On the slow path the 200 head is committed before the handler
++ * resolves, so these headers would be lost; the frame below carries them in the stream instead.
++ */
++const ROUTE_PROVENANCE_FIELDS: ReadonlyArray<[header: string, key: string]> = [
++  ["x-omniroute-route", "route"],
++  ["x-omniroute-attempts", "attempts"],
++  ["x-router-reason", "reason"],
++  ["x-router-confidence", "confidence"],
++  ["x-router-item", "item"],
++  ["x-router-specialist", "specialist"],
++  ["x-router-thinking", "thinking"],
++  ["x-omniroute-context-length", "context_length"],
++  ["x-omniroute-max-output-tokens", "max_output_tokens"],
++];
++
++/**
++ * One OpenAI-compatible chunk with no choices and an `x_omniroute` object holding the route
++ * provenance headers of the handler's response, or null when it has none. Brand-neutral id/model
++ * (`keepalive`, like the startup frame), so clients that read only `choices` see nothing.
++ */
++export function openAiRouteProvenanceFrame(headers: Headers): Uint8Array | null {
++  const fields: Record<string, string> = {};
++  for (const [header, key] of ROUTE_PROVENANCE_FIELDS) {
++    const value = headers.get(header);
++    if (value) fields[key] = value;
++  }
++  if (!fields.route) return null;
++  return ENCODER.encode(
++    `data: ${JSON.stringify({ id: "chatcmpl-keepalive", object: "chat.completion.chunk", created: 0, model: "keepalive", choices: [], x_omniroute: fields })}\n\n`
++  );
++}
++
+ const MAX_RETRY_AFTER_SECONDS = 3600;
+ 
+ /**
+@@ -251,6 +285,12 @@ export type EarlyStreamKeepaliveOptions = {
+   applicationKeepalive?: { frame: Uint8Array; intervalMs: number };
+   /** Extra headers to include in the keepalive response (e.g. X-Correlation-Id). */
+   extraHeaders?: Record<string, string>;
++  /**
++   * Slow path only: called with the handler's SSE response headers once it resolves; a returned
++   * frame is written just before the forwarded body. The committed head cannot carry headers the
++   * handler set late (route provenance), so OpenAI chat passes `openAiRouteProvenanceFrame`.
++   */
++  provenanceFrame?: (headers: Headers) => Uint8Array | null;
+   /**
+    * Frame emitted if the handler ultimately fails (or the upstream stream dies
+    * mid-flight with zero bytes forwarded) after the slow path has already
+@@ -695,6 +735,17 @@ export async function withEarlyStreamKeepalive(
+           const isSse = contentType.includes("text/event-stream");
+ 
+           if (response.body && isSse) {
++            // Headers the committed head could not carry go in-band first (never fails the stream).
++            let lateHeaders: Uint8Array | null = null;
++            try {
++              lateHeaders = options.provenanceFrame?.(response.headers) ?? null;
++            } catch {
++              lateHeaders = null;
++            }
++            if (lateHeaders) {
++              controller.enqueue(lateHeaders);
++              recordClientBytes(lateHeaders);
++            }
+             // Real SSE stream — forward it verbatim.
+             upstreamReader = response.body.getReader();
+             let bytesForwarded = 0;
+diff --git a/src/app/api/v1/chat/completions/route.ts b/src/app/api/v1/chat/completions/route.ts
+index de8b907d..e1eef84a 100644
+--- a/src/app/api/v1/chat/completions/route.ts
++++ b/src/app/api/v1/chat/completions/route.ts
+@@ -17,6 +17,7 @@ import {
+   OPENAI_KEEPALIVE_FRAME,
+   OPENAI_STARTUP_FRAME,
+   withEarlyStreamKeepalive,
++  openAiRouteProvenanceFrame,
+ } from "@omniroute/open-sse/utils/earlyStreamKeepalive";
+ import { createStreamDeadlineSignal } from "@omniroute/open-sse/utils/streamDeadlineSignal";
+ import { resolveKeepaliveThreshold } from "@omniroute/open-sse/utils/keepaliveThreshold";
+@@ -412,6 +413,7 @@ export async function POST(request) {
+         keepaliveFrame: OPENAI_KEEPALIVE_FRAME,
+         startupFrame: OPENAI_STARTUP_FRAME,
+         errorFrame: OPENAI_CHAT_ERROR_FRAME,
++        provenanceFrame: openAiRouteProvenanceFrame,
+         correlationId: reqId,
+         extraHeaders: { "X-Correlation-Id": reqId },
+         deadlineController: routeDeadlineController,
+diff --git a/src/lib/plugins/hooks.ts b/src/lib/plugins/hooks.ts
+index 7a59508d..c161a910 100644
+--- a/src/lib/plugins/hooks.ts
++++ b/src/lib/plugins/hooks.ts
+@@ -33,8 +33,12 @@ export interface HookRegistration {
+ 
+ // ── Built-in events ──
+ 
++// onRoute/onRouteResult are emitted only by the chat handler (once per request, before
++// model/combo resolution), never by the generic hook plumbing.
+ export const BUILTIN_EVENTS = [
+   "onRequest",
++  "onRoute",
++  "onRouteResult",
+   "onResponse",
+   "onError",
+   "onInstall",
+@@ -76,6 +80,56 @@ function isRateLimited(pluginName: string): boolean {
+   return false;
+ }
+ 
++// ── onRoute: pre-resolution routing hook ──
++
++/** Context for the pre-resolution routing hook. A plugin may answer with an ordered list of
++ *  explicit model ids; they become an in-memory priority combo, and every existing combo
++ *  behaviour (per-target API-key policy, connection selection, cooldowns, fallback) applies unchanged. */
++export interface PluginRouteContext {
++  requestId: string;
++  body: unknown;
++  /** The model the client asked for, after alias/header resolution. */
++  model: string;
++  apiKeyInfo?: unknown;
++  /** Client request headers (best-effort; empty when the caller lacks them). */
++  headers?: Record<string, string | string[] | undefined>;
++}
++
++/** A plugin's routing answer: the ordered list of dispatch ids to try, in fallback order. */
++export interface PluginRouteResult {
++  models?: string[];
++  /** Free-form note recorded in the router log (never sent to the client). */
++  reason?: string;
++}
++
++/** One dispatched attempt of a plugin-routed combo. Routing metadata only. */
++export interface PluginRouteOutcome {
++  /** "<provider>/<model>" as dispatched. */
++  model: string;
++  /** True when this target produced a response (2xx or a quality-passing one). */
++  ok: boolean;
++  status: number | null;
++  /** classifyComboOutcome kind (auth | rate_limit | timeout | provider | model | quality | skipped | upstream); null on success. */
++  kind: string | null;
++  /** Patch 0010: true when the provider said this model's allowance is spent (a usage limit, not a short rate limit). */
++  limit?: boolean;
++  latencyMs: number;
++}
++
++export interface PluginRouteResultPayload {
++  requestId: string;
++  /** The model the client asked for (e.g. "free" / "paid"). */
++  model: string;
++  /** Final HTTP status of the combo response. */
++  status: number;
++  /** The plugin's own list, echoed back. */
++  listed: string[];
++  /** What each dispatched attempt ended with, in dispatch order. */
++  attempts: PluginRouteOutcome[];
++  /** Pre-dispatch skips the combo applied (cooldown/breaker/...). */
++  skipped: { model: string; reason: string }[];
++}
++
+ // ── Registry ──
+ 
+ const hooks: Map<string, HookRegistration[]> = new Map();
+@@ -253,6 +307,10 @@ export interface Plugin {
+   priority?: number;
+   enabled?: boolean;
+   onRequest?: (ctx: PluginContext) => Promise<PluginResult | void> | PluginResult | void;
++  onRoute?: (
++    ctx: PluginRouteContext
++  ) => Promise<PluginRouteResult | void> | PluginRouteResult | void;
++  onRouteResult?: (payload: PluginRouteResultPayload) => Promise<void> | void;
+   onResponse?: (ctx: PluginContext, response: unknown) => Promise<unknown | void> | unknown | void;
+   onError?: (ctx: PluginContext, error: Error) => Promise<unknown | void> | unknown | void;
+   // ── Lifecycle hooks (fire-and-forget, non-blocking) ──
+@@ -390,3 +448,41 @@ export function resetHooks(): void {
+   hooks.clear();
+   rateLimitMap.clear();
+ }
++/**
++ * Run onRoute hooks in priority order; the first handler returning a non-empty list of
++ * model-id strings wins. Handler errors are logged and skipped (fail-open).
++ */
++export async function runOnRoute(ctx: PluginRouteContext): Promise<PluginRouteResult | null> {
++  await ensurePluginsLoaded();
++  const list = hooks.get("onRoute") || [];
++  for (const reg of list) {
++    assertPluginHandlerAllowed();
++    if (isRateLimited(reg.pluginName)) {
++      log.warn("hook.route_rate_limited", { pluginName: reg.pluginName });
++      continue;
++    }
++    try {
++      const result = (await reg.handler(ctx)) as PluginRouteResult | void;
++      if (
++        result &&
++        typeof result === "object" &&
++        Array.isArray(result.models) &&
++        result.models.length > 0 &&
++        result.models.every((m) => typeof m === "string" && m.length > 0)
++      ) {
++        return result;
++      }
++    } catch (err: unknown) {
++      log.error("hook.route_handler_error", {
++        pluginName: reg.pluginName,
++        error: err instanceof Error ? err.message : String(err),
++      });
++    }
++  }
++  return null;
++}
++
++/** Run onRouteResult hooks — fire-and-forget notification. */
++export async function runOnRouteResult(payload: PluginRouteResultPayload): Promise<void> {
++  await emitHook("onRouteResult", payload);
++}
+diff --git a/src/lib/plugins/index.ts b/src/lib/plugins/index.ts
+index 656116f0..d177f089 100644
+--- a/src/lib/plugins/index.ts
++++ b/src/lib/plugins/index.ts
+@@ -24,11 +24,16 @@ export type {
+   BlockingHookResult,
+   HookHandler,
+   HookRegistration,
++  PluginRouteContext,
++  PluginRouteResult,
++  PluginRouteResultPayload,
+ } from "./hooks.ts";
+ 
+ // Re-export execution functions from hooks.ts
+ export {
+   runOnRequest,
++  runOnRoute,
++  runOnRouteResult,
+   runOnResponse,
+   runOnError,
+   resetHooks as resetPlugins,
+@@ -57,9 +62,7 @@ import { getActiveEvents, getHooks, unregisterHooks } from "./hooks.ts";
+  */
+ export function setPluginEnabled(name: string, enabled: boolean): boolean {
+   const hasHooks = (): boolean =>
+-    getActiveEvents().some((event) =>
+-      getHooks(event).some((h) => h.pluginName === name)
+-    );
++    getActiveEvents().some((event) => getHooks(event).some((h) => h.pluginName === name));
+   if (!enabled) {
+     const existed = hasHooks();
+     unregisterHooks(name);
+diff --git a/src/lib/plugins/loader.ts b/src/lib/plugins/loader.ts
+index 71e9223b..b67a090a 100644
+--- a/src/lib/plugins/loader.ts
++++ b/src/lib/plugins/loader.ts
+@@ -32,7 +32,7 @@ const SIGKILL_GRACE_MS = 3_000;
+ // plugin dead-but-shown-active until a manual deactivate/activate. Blocking hooks
+ // (onRequest/onResponse/onError) and the rarely-fired lifecycle hooks keep the
+ // kill-on-timeout isolation semantics.
+-const NOTIFICATION_HOOKS: ReadonlySet<string> = new Set(["onStreamComplete"]);
++const NOTIFICATION_HOOKS: ReadonlySet<string> = new Set(["onStreamComplete", "onRouteResult"]);
+ 
+ // #8395: stdout/stderr forwarding hygiene — cap how much of a plugin's own console
+ // output we relay per stream, so a runaway/misbehaving plugin can't flood memory or
+@@ -391,7 +391,13 @@ export async function loadPlugin(
+   // applies. Without this branch the event fires into an empty registry and is dropped
+   // for every disk-installed plugin (#11825).
+   const lifecycleHooks: Array<{
+-    key: "onInstall" | "onActivate" | "onDeactivate" | "onUninstall" | "onStreamComplete";
++    key:
++      | "onInstall"
++      | "onActivate"
++      | "onDeactivate"
++      | "onUninstall"
++      | "onStreamComplete"
++      | "onRouteResult";
+     manifestFlag: boolean;
+   }> = [
+     { key: "onInstall", manifestFlag: manifest.hooks.onInstall },
+@@ -399,6 +405,7 @@ export async function loadPlugin(
+     { key: "onDeactivate", manifestFlag: manifest.hooks.onDeactivate },
+     { key: "onUninstall", manifestFlag: manifest.hooks.onUninstall },
+     { key: "onStreamComplete", manifestFlag: manifest.hooks.onStreamComplete },
++    { key: "onRouteResult", manifestFlag: manifest.hooks.onRouteResult },
+   ];
+ 
+   for (const { key, manifestFlag } of lifecycleHooks) {
+diff --git a/src/lib/plugins/manager.ts b/src/lib/plugins/manager.ts
+index f33e32bb..73813437 100644
+--- a/src/lib/plugins/manager.ts
++++ b/src/lib/plugins/manager.ts
+@@ -33,6 +33,8 @@ const log = logger("PLUGIN_MANAGER");
+ type LifecycleHookName = Extract<
+   keyof Plugin,
+   | "onRequest"
++  | "onRoute"
++  | "onRouteResult"
+   | "onResponse"
+   | "onError"
+   | "onInstall"
+@@ -414,6 +416,8 @@ class PluginManager {
+ 
+       const hookNames: LifecycleHookName[] = [
+         "onRequest",
++        "onRoute",
++        "onRouteResult",
+         "onResponse",
+         "onError",
+         "onInstall",
+diff --git a/src/lib/plugins/manifest.ts b/src/lib/plugins/manifest.ts
+index fe38caa4..20a8f38a 100644
+--- a/src/lib/plugins/manifest.ts
++++ b/src/lib/plugins/manifest.ts
+@@ -37,6 +37,8 @@ export type ConfigField = z.infer<typeof ConfigFieldSchema>;
+ 
+ export const HooksSchema = z.object({
+   onRequest: z.boolean().optional(),
++  onRoute: z.boolean().optional(),
++  onRouteResult: z.boolean().optional(),
+   onResponse: z.boolean().optional(),
+   onError: z.boolean().optional(),
+   onInstall: z.boolean().optional(),
+@@ -100,6 +102,8 @@ export interface PluginManifestWithDefaults extends PluginManifest {
+   requires: { omniroute?: string; permissions: Permission[] };
+   hooks: {
+     onRequest: boolean;
++    onRoute: boolean;
++    onRouteResult: boolean;
+     onResponse: boolean;
+     onError: boolean;
+     onInstall: boolean;
+@@ -126,6 +130,8 @@ export function applyDefaults(manifest: PluginManifest): PluginManifestWithDefau
+     },
+     hooks: {
+       onRequest: manifest.hooks?.onRequest ?? false,
++      onRoute: manifest.hooks?.onRoute ?? false,
++      onRouteResult: manifest.hooks?.onRouteResult ?? false,
+       onResponse: manifest.hooks?.onResponse ?? false,
+       onError: manifest.hooks?.onError ?? false,
+       onInstall: manifest.hooks?.onInstall ?? false,
+diff --git a/src/lib/plugins/pluginRegistration.ts b/src/lib/plugins/pluginRegistration.ts
+index 3ec8ed75..a17ad99c 100644
+--- a/src/lib/plugins/pluginRegistration.ts
++++ b/src/lib/plugins/pluginRegistration.ts
+@@ -20,6 +20,8 @@ export function pluginRegistration(
+     configSchema: manifest.configSchema as unknown as Record<string, unknown>,
+     hooks: [
+       manifest.hooks.onRequest && "onRequest",
++      manifest.hooks.onRoute && "onRoute",
++      manifest.hooks.onRouteResult && "onRouteResult",
+       manifest.hooks.onResponse && "onResponse",
+       manifest.hooks.onError && "onError",
+       manifest.hooks.onInstall && "onInstall",
+diff --git a/src/lib/plugins/sdk.ts b/src/lib/plugins/sdk.ts
+index 245d882a..393c33f1 100644
+--- a/src/lib/plugins/sdk.ts
++++ b/src/lib/plugins/sdk.ts
+@@ -12,9 +12,20 @@ import type {
+   PluginContext,
+   PluginResult,
+   BlockingHookResult,
++  PluginRouteContext,
++  PluginRouteResult,
++  PluginRouteResultPayload,
+ } from "./hooks.ts";
+ 
+-export type { Plugin, PluginContext, PluginResult, BlockingHookResult };
++export type {
++  Plugin,
++  PluginContext,
++  PluginResult,
++  BlockingHookResult,
++  PluginRouteContext,
++  PluginRouteResult,
++  PluginRouteResultPayload,
++};
+ 
+ // ── Plugin Definition Helper ──
+ 
+@@ -29,6 +40,13 @@ export interface PluginDefinition {
+   onRequest?: (ctx: PluginContext) => Promise<PluginResult | void> | PluginResult | void;
+   /** Hook: runs after chat handler. Can modify response. */
+   onResponse?: (ctx: PluginContext, response: unknown) => Promise<unknown | void> | unknown | void;
++  /** Hook: runs before model/combo resolution. A plugin may answer with an ordered list of
++   *  explicit model ids; they become an in-memory priority combo. */
++  onRoute?: (
++    ctx: PluginRouteContext
++  ) => Promise<PluginRouteResult | void> | PluginRouteResult | void;
++  /** Hook: one-way notification after a plugin-routed combo finished, with per-attempt outcomes. */
++  onRouteResult?: (payload: PluginRouteResultPayload) => Promise<void> | void;
+   /** Hook: runs on handler error. Can recover or re-throw. */
+   onError?: (ctx: PluginContext, error: Error) => Promise<unknown | void> | unknown | void;
+ }
+@@ -59,6 +77,8 @@ export function definePlugin(def: PluginDefinition): Plugin {
+     priority: def.priority ?? 100,
+     enabled: def.enabled ?? true,
+     onRequest: def.onRequest,
++    onRoute: def.onRoute,
++    onRouteResult: def.onRouteResult,
+     onResponse: def.onResponse,
+     onError: def.onError,
+   };
+diff --git a/src/sse/handlers/chat.ts b/src/sse/handlers/chat.ts
+index bcea3f95..97239c95 100644
+--- a/src/sse/handlers/chat.ts
++++ b/src/sse/handlers/chat.ts
+@@ -80,7 +80,7 @@ import { isCommonChatGptWebRetirementError } from "@/shared/constants/chatgptWeb
+ import { isChatGptWebCodexModel } from "@/shared/constants/chatgptWebCodex";
+ import { deleteHandoff, getHandoff } from "@/lib/db/contextHandoffs";
+ import { getComboByName, updateCombo } from "@/lib/db/combos";
+-import { isModelAllowedForKey } from "@/lib/db/apiKeys";
++import { isModelAllowedForKey, isModelBlockedByPatterns } from "@/lib/db/apiKeys";
+ import { promoteSuccessfulComboModel } from "@/lib/combos/autoPromote";
+ import {
+   deleteSessionAccountAffinity,
+@@ -95,6 +95,12 @@ import { comboCheckProvider, ghComboGate } from "./chat/githubLiveCatalogFilter.
+ import { markEmergencyFallback } from "./emergencyFallbackHeader.ts";
+ import { resolveEmergencyFallbackDecision } from "./emergencyFallbackHeader.ts";
+ import { evaluateComboTargetPreflight } from "./chat/comboTargetKeyPolicy.ts";
++import {
++  runPluginOnRouteHook,
++  buildPluginRouteCombo,
++  withPluginRouteHeaders,
++  emitPluginRouteResult,
++} from "./chat/pluginOnRoute.ts";
+ import * as resolvedPolicy from "./chat/resolvedModelPolicy.ts";
+ import { recordGateRejection, recordQuotaParkedSkip } from "./quotaParkedSkipUsage";
+ import { getCombos } from "@/lib/db/combos";
+@@ -1042,12 +1048,39 @@ async function handleChatImplementation(
+   reasoningDecision = reasoningRouting.reasoningDecision;
+   requestRoutingTags = reasoningRouting.requestRoutingTags;
+ 
++  // onRoute: give the routing plugin the first say on the requested model. The plugin answers
++  // with an ordered list of explicit model ids; they become an in-memory priority combo, so
++  // every existing combo behaviour (policy, cooldowns, fallback) applies unchanged. Fail-open.
++  let pluginRouteCombo: any = null;
++  {
++    const routed = await runPluginOnRouteHook({
++      requestId: reqId,
++      body,
++      model: resolvedModelStr,
++      apiKeyInfo,
++      headers: Object.fromEntries(request?.headers?.entries() || []),
++      isBlocked: (m) => isModelBlockedByPatterns(apiKeyInfo?.blockedModels, m),
++      log,
++    });
++    if (routed) {
++      pluginRouteCombo = buildPluginRouteCombo(resolvedModelStr, routed.models, reqId, {
++        reason: routed.reason,
++        confidence: routed.confidence,
++        item: routed.item,
++        specialist: routed.specialist,
++        thinking: routed.thinking,
++        thinkingByModel: routed.thinkingByModel,
++        windowsByModel: routed.windowsByModel,
++      });
++    }
++  }
++
+   const autoRouting = await resolveAutoRoutingState(resolvedModelStr);
+   if (autoRouting.response) return autoRouting.response;
+ 
+   // Check if model is a combo (has multiple models with fallback)
+   telemetry.startPhase("resolve");
+-  let combo: any = await getComboForModel(resolvedModelStr);
++  let combo: any = pluginRouteCombo ?? (await getComboForModel(resolvedModelStr));
+   if (reasoningDecision?.targetCombo) combo = reasoningDecision.targetCombo;
+ 
+   // "auto" prefix fuzzy matching: "auto/fast" → "auto/best-fast", etc.
+@@ -1307,6 +1340,24 @@ async function handleChatImplementation(
+     }
+     comboPreselectedCredentials.clear();
+ 
++    // onRouteResult: tell the routing plugin how its list went (fire-and-forget), and stamp
++    // the response head with route provenance headers before it commits. Only when the plugin
++    // combo is the one that actually ran.
++    if (pluginRouteCombo && combo?.id === pluginRouteCombo.id) {
++      try {
++        withPluginRouteHeaders(response, pluginRouteCombo);
++        emitPluginRouteResult({
++          requestId: reqId,
++          requestedModel: resolvedModelStr,
++          combo: pluginRouteCombo,
++          response: { status: response.status },
++          log,
++        });
++      } catch {
++        // route provenance is best-effort; never fail the request over it
++      }
++    }
++
+     // ── Global Fallback Provider (#689) ────────────────────────────────────
+     // If combo exhausted all models, try the global fallback before giving up.
+     if (
+diff --git a/src/sse/handlers/chat/pluginOnRoute.ts b/src/sse/handlers/chat/pluginOnRoute.ts
+new file mode 100644
+index 00000000..cd0e44db
+--- /dev/null
++++ b/src/sse/handlers/chat/pluginOnRoute.ts
+@@ -0,0 +1,432 @@
++/**
++ * Plugin `onRoute` hook for the chat handler.
++ *
++ * Runs before model/combo resolution. A plugin may answer with an ordered list of explicit
++ * model ids; they become an in-memory priority combo, so every existing combo behaviour
++ * (per-target API-key policy, connection selection, cooldowns, fallback) applies unchanged.
++ * Fail-open: no plugin, no answer, or any error leaves routing exactly as it was.
++ */
++
++import {
++  createInvocationId,
++  getComboTrace,
++  type ComboTrace,
++} from "@omniroute/open-sse/services/combo/decisionTrace.ts";
++
++type LoggerLike =
++  | {
++      info?: (...args: unknown[]) => void;
++      warn?: (...args: unknown[]) => void;
++      debug?: (...args: unknown[]) => void;
++    }
++  | null
++  | undefined;
++
++type PluginThinking = { control: "effort" | "toggle" | "none"; value?: string };
++
++type PluginRouteWindow = { context_length?: number; max_output_tokens?: number };
++
++type PluginRouteMetadata = {
++  reason?: string;
++  confidence?: number;
++  thinking?: PluginThinking;
++  /** Per-attempt thinking by target id (patch 0010); replaces `thinking` for the body when present. */
++  thinkingByModel?: Record<string, PluginThinking>;
++  /** The plugin's menu item id, echoed as `x-router-item`. */
++  item?: string;
++  /** Whether the item is a specialist, echoed as `x-router-specialist` next to the item. */
++  specialist?: boolean;
++  /**
++   * Per-route windows by target id (patch 0011); echoed for the answering attempt as
++   * x-omniroute-context-length / x-omniroute-max-output-tokens.
++   */
++  windowsByModel?: Record<string, PluginRouteWindow>;
++};
++
++/** The plugin's answer after API-key filtering. `reason`/`confidence` are routing provenance. */
++export interface PluginRouteSelection extends PluginRouteMetadata {
++  models: string[];
++}
++
++/**
++ * Combo shape used by the response-header helper. The provenance fields never leave this process
++ * except as the two allowlisted `x-router-*` headers.
++ */
++type PluginRouteComboLike = PluginRouteMetadata & {
++  traceInvocationId?: string;
++  models: Array<{ model: string }>;
++  routeThinking?: PluginThinking;
++  routeThinkingByModel?: Record<string, PluginThinking>;
++  routeItem?: string;
++  routeSpecialist?: boolean;
++  routeWindowsByModel?: Record<string, PluginRouteWindow>;
++};
++
++export const MAX_PLUGIN_ROUTE_MODELS = 12;
++
++/** Allowlist the wire shape; anything malformed is dropped rather than sent upstream. */
++function normalizePluginThinking(value: unknown): PluginThinking | null {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
++  const record = value as Record<string, unknown>;
++  const control = record.control;
++  if (control === "none") return { control };
++  if (control !== "effort" && control !== "toggle") return null;
++  const text = typeof record.value === "string" ? record.value.trim() : "";
++  if (!text || text.length > 32 || /[\r\n]/.test(text)) return null;
++  if (control === "toggle" && text !== "off" && text !== "on") return null;
++  return { control, value: text };
++}
++
++const ITEM_ID = /^[A-Za-z0-9_-]{1,16}$/;
++
++/** A menu item id, or null: never echoed unless it is a short plain token. */
++function normalizeRouteItem(value: unknown): string | null {
++  return typeof value === "string" && ITEM_ID.test(value) ? value : null;
++}
++
++/**
++ * Per-attempt thinking: only targets that are in the final model list, each through the same allowlist
++ * as `thinking`. A malformed entry is dropped (that attempt then gets {control:"none"}). Null when the
++ * plugin sent no usable map, so the single-`thinking` behaviour of 0008 stays.
++ */
++function normalizeThinkingByModel(
++  value: unknown,
++  models: string[]
++): Record<string, PluginThinking> | null {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
++  const out: Record<string, PluginThinking> = {};
++  for (const model of models) {
++    if (!Object.prototype.hasOwnProperty.call(value, model)) continue;
++    const t = normalizePluginThinking((value as Record<string, unknown>)[model]);
++    if (t) out[model] = t;
++  }
++  return Object.keys(out).length ? out : null;
++}
++
++const MAX_WINDOW_TOKENS = 100_000_000;
++
++function normalizeWindowFigure(value: unknown): number | null {
++  if (typeof value !== "number" || !Number.isFinite(value)) return null;
++  if (value < 1 || value > MAX_WINDOW_TOKENS) return null;
++  if (Math.floor(value) !== value) return null;
++  return value;
++}
++
++/**
++ * Per-route windows: only targets that are in the final model list, and only finite integer figures
++ * in the sane range. A target without any usable figure is dropped; the headers are then omitted for
++ * it. Never a guess: what the plugin does not know stays absent.
++ */
++function normalizeWindowsByModel(
++  value: unknown,
++  models: string[]
++): Record<string, PluginRouteWindow> | null {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
++  const out: Record<string, PluginRouteWindow> = {};
++  for (const model of models) {
++    if (!Object.prototype.hasOwnProperty.call(value, model)) continue;
++    const raw = (value as Record<string, unknown>)[model];
++    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
++    const record = raw as Record<string, unknown>;
++    const entry: PluginRouteWindow = {};
++    const contextLength = normalizeWindowFigure(record.context_length);
++    const maxOutputTokens = normalizeWindowFigure(record.max_output_tokens);
++    if (contextLength) entry.context_length = contextLength;
++    if (maxOutputTokens) entry.max_output_tokens = maxOutputTokens;
++    if (Object.keys(entry).length) out[model] = entry;
++  }
++  return Object.keys(out).length ? out : null;
++}
++
++/**
++ * The thinking one attempt of a plugin-routed combo carries: its own entry when the plugin sent a
++ * per-attempt map, {control:"none"} for a target the map leaves out, or the shared selection (0008).
++ */
++export function pluginAttemptThinking(
++  combo: PluginRouteComboLike | null | undefined,
++  model: string
++): PluginThinking | undefined {
++  if (!combo) return undefined;
++  if (combo.routeThinkingByModel) return combo.routeThinkingByModel[model] ?? { control: "none" };
++  return combo.routeThinking;
++}
++
++export async function runPluginOnRouteHook(args: {
++  requestId: string;
++  body: unknown;
++  model: string;
++  apiKeyInfo: unknown;
++  headers?: Record<string, string | string[] | undefined>;
++  /**
++   * API-key deny list. An explicit deny always wins over a plugin's choice (a combo the key may
++   * use otherwise vouches for its members, so without this a plugin could route around it).
++   */
++  isBlocked?: (model: string) => Promise<boolean>;
++  log?: LoggerLike;
++}): Promise<PluginRouteSelection | null> {
++  try {
++    const { runOnRoute } = await import("@/lib/plugins/hooks");
++    const result = await runOnRoute({
++      requestId: args.requestId,
++      body: args.body,
++      model: args.model,
++      apiKeyInfo: args.apiKeyInfo,
++      headers: args.headers,
++    });
++    if (!result?.models?.length) return null;
++    let models = [...new Set(result.models)];
++    if (args.isBlocked) {
++      const keep: string[] = [];
++      for (const m of models) if (!(await args.isBlocked(m))) keep.push(m);
++      if (keep.length !== models.length) {
++        args.log?.info?.(
++          "PLUGIN",
++          `onRoute: dropped ${models.length - keep.length} model(s) blocked by the API key`
++        );
++      }
++      models = keep;
++    }
++    models = models.slice(0, MAX_PLUGIN_ROUTE_MODELS);
++    if (models.length === 0) return null;
++    args.log?.info?.(
++      "PLUGIN",
++      `onRoute: ${args.model} → [${models.join(", ")}]${result.reason ? ` (${result.reason})` : ""}`
++    );
++    const thinking = normalizePluginThinking(result.thinking);
++    const thinkingByModel = normalizeThinkingByModel(result.thinking_by_model, models);
++    const item = normalizeRouteItem(result.item);
++    const windowsByModel = normalizeWindowsByModel(result.windows_by_model, models);
++    return {
++      models,
++      ...(typeof result.reason === "string" ? { reason: result.reason } : {}),
++      ...(typeof result.confidence === "number" ? { confidence: result.confidence } : {}),
++      ...(thinking ? { thinking } : {}),
++      ...(thinkingByModel ? { thinkingByModel } : {}),
++      ...(item ? { item } : {}),
++      ...(item && typeof result.specialist === "boolean" ? { specialist: result.specialist } : {}),
++      ...(windowsByModel ? { windowsByModel } : {}),
++    };
++  } catch (err) {
++    args.log?.debug?.(
++      "PLUGIN",
++      `onRoute hook error (non-fatal): ${err instanceof Error ? err.message : String(err)}`
++    );
++    return null;
++  }
++}
++
++/** Same document shape as a stored priority combo, never persisted. */
++export function buildPluginRouteCombo(
++  requestedModel: string,
++  models: string[],
++  requestId: string,
++  metadata: PluginRouteMetadata = {}
++) {
++  return {
++    id: `plugin-route-${requestId}`,
++    name: requestedModel,
++    strategy: "priority",
++    models: models.map((model, i) => ({
++      id: `plugin-route-${i + 1}`,
++      kind: "model",
++      model,
++      weight: 0,
++    })),
++    // The list IS the fallback order: hop to the next model at once. (OmniRoute already rotates
++    // accounts inside one attempt; the default same-model retry would add a 2 s stall per dead member.)
++    config: { maxRetries: 0 },
++    // lets chat.ts read this invocation's per-attempt outcomes back for onRouteResult
++    traceInvocationId: createInvocationId(),
++    // Route provenance for the response head; never persisted with the combo.
++    routeReason: typeof metadata.reason === "string" ? metadata.reason : undefined,
++    routeConfidence: typeof metadata.confidence === "number" ? metadata.confidence : undefined,
++    routeThinking: normalizePluginThinking(metadata.thinking) ?? undefined,
++    routeThinkingByModel: normalizeThinkingByModel(metadata.thinkingByModel, models) ?? undefined,
++    routeItem: normalizeRouteItem(metadata.item) ?? undefined,
++    routeSpecialist: typeof metadata.specialist === "boolean" ? metadata.specialist : undefined,
++    routeWindowsByModel: normalizeWindowsByModel(metadata.windowsByModel, models) ?? undefined,
++    isHidden: true,
++    isActive: true,
++    sortOrder: 0,
++    version: 1,
++  };
++}
++
++/**
++ * Write the plugin's native thinking control into the request body. Mutates a copy, never the
++ * caller's object: the combo path may reuse the body for other targets. Conflicting effort
++ * fields are removed so one control wins; the plugin only sends a value the route is known to
++ * accept (its per-model map), so this is not a guess about the provider's enum.
++ */
++export function applyPluginRouteThinking<T>(body: T, thinking: unknown): T {
++  const t = normalizePluginThinking(thinking);
++  if (!body || typeof body !== "object" || Array.isArray(body) || !t) return body;
++  const next = { ...(body as Record<string, unknown>) };
++  const reasoning =
++    next.reasoning && typeof next.reasoning === "object" && !Array.isArray(next.reasoning)
++      ? { ...(next.reasoning as Record<string, unknown>) }
++      : null;
++  delete reasoning?.effort;
++  if (reasoning && Object.keys(reasoning).length === 0) delete next.reasoning;
++  else if (reasoning) next.reasoning = reasoning;
++  if (
++    next.output_config &&
++    typeof next.output_config === "object" &&
++    !Array.isArray(next.output_config)
++  ) {
++    const output = { ...(next.output_config as Record<string, unknown>) };
++    delete output.effort;
++    if (Object.keys(output).length === 0) delete next.output_config;
++    else next.output_config = output;
++  }
++
++  if (t.control === "none") {
++    delete next.reasoning_effort;
++    delete next.thinking;
++    return next as T;
++  }
++  if (t.control === "effort") {
++    next.reasoning_effort = String(t.value);
++    delete next.thinking;
++    return next as T;
++  }
++  delete next.reasoning_effort;
++  next.thinking = { type: t.value === "off" ? "disabled" : "enabled" };
++  return next as T;
++}
++
++/** Allowlist `jev`, `static`, `static:cont`; anything else is omitted (never echoed). */
++function normalizeRouteReason(value: unknown): string | null {
++  if (typeof value !== "string") return null;
++  const reason = value.trim();
++  return reason === "jev" || reason === "static" || reason === "static:cont" ? reason : null;
++}
++
++/** 0..1 only; rounded to three decimals to keep the header stable (warslop parses basis points). */
++function normalizeRouteConfidence(value: unknown): string | null {
++  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) return null;
++  return String(Math.round(value * 1000) / 1000);
++}
++
++function safeHeaderValue(value: unknown): string | null {
++  if (typeof value !== "string") return null;
++  const trimmed = value.trim();
++  if (!trimmed || trimmed.length > 512 || /[\r\n]/.test(trimmed)) return null;
++  return trimmed;
++}
++
++/**
++ * Route provenance for a successful plugin-routed combo: the exact dispatched target, how many
++ * attempts ran, and the plugin's reason/confidence. Only routing metadata — never a body or key.
++ * The header map is empty until the combo has a successful outcome, so failed requests keep their
++ * existing headers.
++ */
++export function buildPluginRouteHeaders(
++  combo: PluginRouteComboLike | null | undefined,
++  trace?: ComboTrace | null
++): Record<string, string> {
++  if (!combo) return {};
++  const invocation =
++    trace ?? (combo.traceInvocationId ? getComboTrace(combo.traceInvocationId) : null);
++  const outcomes = invocation?.outcomes ?? [];
++  const success = [...outcomes].reverse().find((o) => o.ok);
++  const target = safeHeaderValue(success?.target);
++  if (!target) return {};
++
++  const headers: Record<string, string> = {
++    "x-omniroute-route": target,
++    "x-omniroute-attempts": String(outcomes.length),
++  };
++  const reason = normalizeRouteReason(combo.routeReason);
++  if (reason) {
++    headers["x-router-reason"] = reason;
++    // Confidence is meaningful only when Jev's pick was the one applied.
++    const confidence = reason === "jev" ? normalizeRouteConfidence(combo.routeConfidence) : null;
++    if (confidence) headers["x-router-confidence"] = confidence;
++  }
++  // Patch 0010: the plugin's menu item, and the thinking the ANSWERING attempt carried ("default" = no field).
++  const item = normalizeRouteItem(combo.routeItem);
++  if (item) headers["x-router-item"] = item;
++  if (item && typeof combo.routeSpecialist === "boolean")
++    headers["x-router-specialist"] = combo.routeSpecialist ? "yes" : "no";
++  if (combo.routeThinkingByModel || combo.routeThinking) {
++    const t = pluginAttemptThinking(combo, target);
++    headers["x-router-thinking"] = t && t.control !== "none" && t.value ? t.value : "default";
++  }
++  // Patch 0011: the answering route's own figures. Absent when the plugin knew neither for it.
++  const win = combo.routeWindowsByModel?.[target];
++  if (win?.context_length) headers["x-omniroute-context-length"] = String(win.context_length);
++  if (win?.max_output_tokens)
++    headers["x-omniroute-max-output-tokens"] = String(win.max_output_tokens);
++  return headers;
++}
++
++/** Add the route headers to a Response before its head is committed. Never throws. */
++export function withPluginRouteHeaders<T extends Response | null | undefined>(
++  response: T,
++  combo: PluginRouteComboLike | null | undefined
++): T | Response {
++  if (!response) return response;
++  try {
++    const headers = buildPluginRouteHeaders(combo);
++    if (Object.keys(headers).length === 0) return response;
++    try {
++      for (const [name, value] of Object.entries(headers)) response.headers.set(name, value);
++      return response;
++    } catch {
++      const cloned = new Response(response.body, {
++        status: response.status,
++        statusText: response.statusText,
++        headers: response.headers,
++      });
++      for (const [name, value] of Object.entries(headers)) cloned.headers.set(name, value);
++      return cloned;
++    }
++  } catch {
++    return response;
++  }
++}
++
++/**
++ * onRouteResult: after the plugin-routed combo finished, tell the plugin how each dispatched target
++ * went (HTTP status + allowlisted kind, never an error body) and which targets OmniRoute skipped.
++ * Fire-and-forget: never awaited by the request, never throws.
++ */
++export function emitPluginRouteResult(args: {
++  requestId: string;
++  requestedModel: string;
++  combo: PluginRouteComboLike;
++  response: { status: number };
++  log?: LoggerLike;
++}): void {
++  void (async () => {
++    try {
++      const id = args.combo.traceInvocationId;
++      const trace = id ? getComboTrace(id) : null;
++      if (!trace) return;
++      const { runOnRouteResult } = await import("@/lib/plugins/hooks");
++      await runOnRouteResult({
++        requestId: args.requestId,
++        model: args.requestedModel,
++        status: args.response.status,
++        listed: args.combo.models.map((m) => m.model),
++        attempts: trace.outcomes.map((o) => ({
++          model: o.target,
++          ok: o.ok,
++          status: o.status,
++          kind: o.kind,
++          latencyMs: o.latencyMs,
++          ...(o.limit ? { limit: true } : {}),
++        })),
++        skipped: trace.decisions
++          .filter((d) => d.decision === "skipped_before_dispatch")
++          .map((d) => ({ model: d.target, reason: d.reason ?? "unknown" })),
++      });
++    } catch (err) {
++      args.log?.debug?.(
++        "PLUGIN",
++        `onRouteResult error (non-fatal): ${err instanceof Error ? err.message : String(err)}`
++      );
++    }
++  })();
++}
+diff --git a/tests/unit/earlyStreamKeepalive.test.ts b/tests/unit/earlyStreamKeepalive.test.ts
+index 86e74811..ef7a43e0 100644
+--- a/tests/unit/earlyStreamKeepalive.test.ts
++++ b/tests/unit/earlyStreamKeepalive.test.ts
+@@ -1,6 +1,9 @@
+ import test from "node:test";
+ import assert from "node:assert/strict";
+-import { withEarlyStreamKeepalive } from "../../open-sse/utils/earlyStreamKeepalive.ts";
++import {
++  openAiRouteProvenanceFrame,
++  withEarlyStreamKeepalive,
++} from "../../open-sse/utils/earlyStreamKeepalive.ts";
+ 
+ const ENCODER = new TextEncoder();
+ const DECODER = new TextDecoder();
+@@ -121,3 +124,117 @@ test("client abort stops keepalive and closes stream", async () => {
+   // Should have received some keepalive frames then closed
+   assert.ok(text.length >= 0, "stream should close on abort");
+ });
++// ── Route provenance on the slow path (jev-router patch 0009/0011) ─────────
++const routed = (headers: Record<string, string>) =>
++  new Response(
++    makeSseStream(['data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', "data: [DONE]\n\n"]),
++    {
++      status: 200,
++      headers: { "content-type": "text/event-stream", ...headers },
++    }
++  );
++const provenanceHeaders = {
++  "x-omniroute-route": "ocpaid/opencode-go/deepseek-v4.1-flash",
++  "x-omniroute-attempts": "2",
++  "x-router-reason": "jev",
++  "x-router-confidence": "0.82",
++};
++
++test("slow path: route provenance headers are sent in-band before the body", async () => {
++  const delayed = new Promise<Response>((resolve) =>
++    setTimeout(() => resolve(routed(provenanceHeaders)), 60)
++  );
++  const result = await withEarlyStreamKeepalive(delayed, {
++    thresholdMs: 10,
++    intervalMs: 1000,
++    provenanceFrame: openAiRouteProvenanceFrame,
++  });
++  const text = await drainStream(result.body!);
++  const frames = text.split("\n\n").filter((f) => f.startsWith("data: {"));
++  const meta = frames.map((f) => JSON.parse(f.slice(6))).find((c) => c.x_omniroute);
++  assert.deepEqual(meta?.x_omniroute, {
++    route: "ocpaid/opencode-go/deepseek-v4.1-flash",
++    attempts: "2",
++    reason: "jev",
++    confidence: "0.82",
++  });
++  assert.deepEqual(meta?.choices, []);
++  assert.equal(meta?.model, "keepalive");
++  assert.ok(
++    text.indexOf("x_omniroute") < text.indexOf('"content":"hi"'),
++    "the provenance frame precedes the body"
++  );
++});
++
++test("slow path: no route header, no provenance frame", async () => {
++  const delayed = new Promise<Response>((resolve) => setTimeout(() => resolve(routed({})), 60));
++  const result = await withEarlyStreamKeepalive(delayed, {
++    thresholdMs: 10,
++    intervalMs: 1000,
++    provenanceFrame: openAiRouteProvenanceFrame,
++  });
++  assert.ok(!(await drainStream(result.body!)).includes("x_omniroute"));
++});
++
++test("fast path: provenance stays in the headers and the body is untouched", async () => {
++  const result = await withEarlyStreamKeepalive(Promise.resolve(routed(provenanceHeaders)), {
++    thresholdMs: 5000,
++    provenanceFrame: openAiRouteProvenanceFrame,
++  });
++  assert.equal(result.headers.get("x-omniroute-route"), "ocpaid/opencode-go/deepseek-v4.1-flash");
++  assert.ok(!(await drainStream(result.body!)).includes("x_omniroute"));
++});
++
++test("the provenance frame carries only the allowlisted routing headers", () => {
++  const frame = openAiRouteProvenanceFrame(
++    new Headers({ ...provenanceHeaders, authorization: "Bearer secret", "x-other": "v" })
++  );
++  const chunk = JSON.parse(new TextDecoder().decode(frame!).replace(/^data: /, ""));
++  assert.deepEqual(Object.keys(chunk.x_omniroute).sort(), [
++    "attempts",
++    "confidence",
++    "reason",
++    "route",
++  ]);
++  assert.equal(openAiRouteProvenanceFrame(new Headers({ "x-router-reason": "static" })), null);
++});
++
++test("the in-band provenance frame carries the menu item and the answering attempt's thinking", async () => {
++  const delayed = new Promise<Response>((resolve) =>
++    setTimeout(
++      () =>
++        resolve(
++          routed({
++            "x-omniroute-route": "ocpaid/opencode-go/muse-spark-1.3-contributor",
++            "x-omniroute-attempts": "1",
++            "x-router-reason": "jev",
++            "x-router-confidence": "0.91",
++            "x-router-item": "P3",
++            "x-router-thinking": "high",
++            "x-router-specialist": "no",
++          })
++        ),
++      60
++    )
++  );
++  const result = await withEarlyStreamKeepalive(delayed, {
++    thresholdMs: 10,
++    intervalMs: 1000,
++    provenanceFrame: openAiRouteProvenanceFrame,
++  });
++  const text = await drainStream(result.body!);
++  const meta = text
++    .split("\n\n")
++    .filter((f) => f.startsWith("data: {"))
++    .map((f) => JSON.parse(f.slice(6)))
++    .find((c) => c.x_omniroute);
++  assert.deepEqual(meta?.x_omniroute, {
++    route: "ocpaid/opencode-go/muse-spark-1.3-contributor",
++    attempts: "1",
++    reason: "jev",
++    confidence: "0.91",
++    item: "P3",
++    thinking: "high",
++    specialist: "no",
++  });
++});
+diff --git a/tests/unit/per-route-window.test.ts b/tests/unit/per-route-window.test.ts
+new file mode 100644
+index 00000000..9076ba5a
+--- /dev/null
++++ b/tests/unit/per-route-window.test.ts
+@@ -0,0 +1,266 @@
++/**
++ * tests/unit/per-route-window.test.ts
++ *
++ * Patch 0011: per-route windows on the response head. The app cannot see which route will serve a
++ * call (model choice and pools live in the router), so the answering attempt's own context_length
++ * and max_output_tokens ride the response next to x-omniroute-route: as headers when the head is
++ * not yet committed, or in-band in the x_omniroute keepalive frame when it is (patch 0009).
++ * Figures are absent when the plugin knows none — never guessed.
++ */
++
++import test from "node:test";
++import assert from "node:assert/strict";
++
++import { registerHook, resetHooks } from "../../src/lib/plugins/hooks.ts";
++import {
++  startComboTrace,
++  recordComboOutcome,
++  resetComboTraceStore,
++} from "../../open-sse/services/combo/decisionTrace.ts";
++import {
++  buildPluginRouteCombo,
++  buildPluginRouteHeaders,
++  runPluginOnRouteHook,
++  withPluginRouteHeaders,
++} from "../../src/sse/handlers/chat/pluginOnRoute.ts";
++import {
++  openAiRouteProvenanceFrame,
++  withEarlyStreamKeepalive,
++} from "../../open-sse/utils/earlyStreamKeepalive.ts";
++
++const ENCODER = new TextEncoder();
++const DECODER = new TextDecoder();
++
++function makeSseStream(chunks: string[]): ReadableStream<Uint8Array> {
++  const encoded = chunks.map((c) => ENCODER.encode(c));
++  let idx = 0;
++  return new ReadableStream<Uint8Array>({
++    pull(controller) {
++      if (idx < encoded.length) controller.enqueue(encoded[idx++]);
++      else controller.close();
++    },
++  });
++}
++
++async function drainStream(body: ReadableStream<Uint8Array>): Promise<string> {
++  const reader = body.getReader();
++  let text = "";
++  while (true) {
++    const { done, value } = await reader.read();
++    if (done) break;
++    text += DECODER.decode(value, { stream: true });
++  }
++  return text;
++}
++
++const routed = (headers: Record<string, string>) =>
++  new Response(
++    makeSseStream(['data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', "data: [DONE]\n\n"]),
++    {
++      status: 200,
++      headers: { "content-type": "text/event-stream", ...headers },
++    }
++  );
++
++function traced(id: string, outcomes: Array<{ target: string; ok: boolean; status: number }>) {
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  for (const [i, o] of outcomes.entries()) {
++    recordComboOutcome(id, {
++      target: o.target,
++      ok: o.ok,
++      status: o.status,
++      kind: o.ok ? null : "provider",
++      latencyMs: 50 + i * 100,
++    });
++  }
++}
++
++test("0011: the headers name the ANSWERING attempt's figures, not the head's", () => {
++  resetComboTraceStore();
++  const combo = buildPluginRouteCombo("paid", ["a/x", "b/y"], "r40", {
++    reason: "jev",
++    confidence: 0.9,
++    windowsByModel: {
++      "a/x": { context_length: 128000, max_output_tokens: 8192 },
++      "b/y": { context_length: 1048576, max_output_tokens: 131072 },
++    },
++  });
++  traced(String(combo.traceInvocationId), [
++    { target: "a/x", ok: false, status: 502 },
++    { target: "b/y", ok: true, status: 200 },
++  ]);
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "b/y",
++    "x-omniroute-attempts": "2",
++    "x-router-reason": "jev",
++    "x-router-confidence": "0.9",
++    "x-omniroute-context-length": "1048576",
++    "x-omniroute-max-output-tokens": "131072",
++  });
++});
++
++test("0011: only usable figures for the answering attempt are echoed (a partial window keeps its good half)", () => {
++  resetComboTraceStore();
++  const combo = buildPluginRouteCombo("paid", ["a/x"], "r41", {
++    windowsByModel: {
++      "a/x": { context_length: 400000, max_output_tokens: 16384.5 },
++    },
++  });
++  traced(String(combo.traceInvocationId), [{ target: "a/x", ok: true, status: 200 }]);
++  const headers = buildPluginRouteHeaders(combo);
++  assert.equal(headers["x-omniroute-context-length"], "400000");
++  assert.equal(headers["x-omniroute-max-output-tokens"], undefined);
++});
++
++test("0011: a wire map with nothing usable for the answering attempt adds no window headers", () => {
++  resetComboTraceStore();
++  const combo = buildPluginRouteCombo("paid", ["a/x"], "r42", {
++    windowsByModel: { "a/x": { context_length: 0, max_output_tokens: -1 } } as never,
++  });
++  traced(String(combo.traceInvocationId), [{ target: "a/x", ok: true, status: 200 }]);
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "a/x",
++    "x-omniroute-attempts": "1",
++  });
++});
++
++test("0011: the wire map is normalized against the final list; figures are capped and integral", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x"], "r43", {
++    windowsByModel: {
++      "a/x": { context_length: 200000.5, max_output_tokens: 100_000_001 },
++      "b/z": { context_length: 999999, max_output_tokens: 4096 },
++    },
++  });
++  // a/x's figures are unusable; b/z is not in the final list
++  assert.deepEqual(combo.routeWindowsByModel, undefined);
++  const ok = buildPluginRouteCombo("paid", ["a/x"], "r44", {
++    windowsByModel: { "a/x": { context_length: 200000, max_output_tokens: 1 } },
++  });
++  assert.deepEqual(ok.routeWindowsByModel, {
++    "a/x": { context_length: 200000, max_output_tokens: 1 },
++  });
++});
++
++test("0011: withPluginRouteHeaders stamps the window headers beside the route headers", () => {
++  resetComboTraceStore();
++  const combo = buildPluginRouteCombo("paid", ["a/x"], "r45", {
++    reason: "static",
++    windowsByModel: { "a/x": { context_length: 131072 } },
++  });
++  traced(String(combo.traceInvocationId), [{ target: "a/x", ok: true, status: 200 }]);
++  const response = withPluginRouteHeaders(new Response("ok"), combo);
++  assert.equal(response.headers.get("x-omniroute-context-length"), "131072");
++  assert.equal(response.headers.get("x-omniroute-max-output-tokens"), null);
++  assert.equal(response.headers.get("x-omniroute-route"), "a/x");
++});
++
++test("0011: runPluginOnRouteHook keeps a windows map for listed targets only", async () => {
++  resetHooks();
++  registerHook(
++    "onRoute",
++    "p",
++    () => ({
++      models: ["a/x", "b/y"],
++      reason: "jev",
++      windows_by_model: {
++        "a/x": { context_length: 128000, max_output_tokens: 8192 },
++        "b/y": { context_length: 1048576 },
++        "z/not-listed": { context_length: 999999 },
++        "a/x/ignored": { context_length: 1 },
++      },
++    }),
++    1
++  );
++  const out = await runPluginOnRouteHook({
++    requestId: "r46",
++    body: {},
++    model: "paid",
++    apiKeyInfo: null,
++  });
++  assert.deepEqual(out?.windowsByModel, {
++    "a/x": { context_length: 128000, max_output_tokens: 8192 },
++    "b/y": { context_length: 1048576 },
++  });
++});
++
++test("0011: malformed windows are dropped, never echoed", async () => {
++  resetHooks();
++  registerHook(
++    "onRoute",
++    "p",
++    () => ({
++      models: ["a/x"],
++      windows_by_model: {
++        "a/x": { context_length: "128000", max_output_tokens: Number.NaN },
++      },
++    }),
++    1
++  );
++  const out = await runPluginOnRouteHook({
++    requestId: "r47",
++    body: {},
++    model: "paid",
++    apiKeyInfo: null,
++  });
++  assert.equal(out?.windowsByModel, undefined);
++});
++
++test("0011: the in-band provenance frame carries the answering route's window", async () => {
++  const delayed = new Promise<Response>((resolve) =>
++    setTimeout(
++      () =>
++        resolve(
++          routed({
++            "x-omniroute-route": "ocpaid/opencode-go/deepseek-v4.1-flash",
++            "x-omniroute-attempts": "2",
++            "x-omniroute-context-length": "1000000",
++            "x-omniroute-max-output-tokens": "65536",
++            "x-router-reason": "jev",
++            "x-router-confidence": "0.82",
++          })
++        ),
++      60
++    )
++  );
++  const result = await withEarlyStreamKeepalive(delayed, {
++    thresholdMs: 10,
++    intervalMs: 1000,
++    provenanceFrame: openAiRouteProvenanceFrame,
++  });
++  const text = await drainStream(result.body!);
++  const meta = text
++    .split("\n\n")
++    .filter((f) => f.startsWith("data: {"))
++    .map((f) => JSON.parse(f.slice(6)))
++    .find((c) => c.x_omniroute);
++  assert.deepEqual(meta?.x_omniroute, {
++    route: "ocpaid/opencode-go/deepseek-v4.1-flash",
++    attempts: "2",
++    context_length: "1000000",
++    max_output_tokens: "65536",
++    reason: "jev",
++    confidence: "0.82",
++  });
++});
++
++test("0011: the provenance frame carries only the allowlisted routing headers, windows included", () => {
++  const frame = openAiRouteProvenanceFrame(
++    new Headers({
++      "x-omniroute-route": "ocpaid/opencode-go/deepseek-v4.1-flash",
++      "x-omniroute-attempts": "1",
++      "x-omniroute-context-length": "1048576",
++      "x-omniroute-max-output-tokens": "131072",
++      "x-router-reason": "jev",
++      authorization: "Bearer secret",
++      "x-other": "v",
++    })
++  );
++  const chunk = JSON.parse(new TextDecoder().decode(frame!).replace(/^data: /, ""));
++  assert.deepEqual(Object.keys(chunk.x_omniroute).sort(), [
++    "attempts",
++    "context_length",
++    "max_output_tokens",
++    "reason",
++    "route",
++  ]);
++});
+diff --git a/tests/unit/plugins-onroute.test.ts b/tests/unit/plugins-onroute.test.ts
+new file mode 100644
+index 00000000..bf1ea1e5
+--- /dev/null
++++ b/tests/unit/plugins-onroute.test.ts
+@@ -0,0 +1,605 @@
++/**
++ * tests/unit/plugins-onroute.test.ts
++ *
++ * onRoute hook: first handler with a non-empty string[] wins, errors/garbage fall through
++ * (fail-open), and the helper builds a stored-shape priority combo from the list.
++ */
++
++import test from "node:test";
++import assert from "node:assert/strict";
++
++import { registerHook, runOnRoute, resetHooks } from "../../src/lib/plugins/hooks.ts";
++import {
++  startComboTrace,
++  recordComboDecision,
++  recordComboOutcome,
++  getComboTrace,
++  resetComboTraceStore,
++} from "../../open-sse/services/combo/decisionTrace.ts";
++import {
++  applyPluginRouteThinking,
++  buildPluginRouteCombo,
++  buildPluginRouteHeaders,
++  emitPluginRouteResult,
++  pluginAttemptThinking,
++  runPluginOnRouteHook,
++  withPluginRouteHeaders,
++  MAX_PLUGIN_ROUTE_MODELS,
++} from "../../src/sse/handlers/chat/pluginOnRoute.ts";
++
++const ctx = { requestId: "r1", body: { model: "paid" }, model: "paid" };
++
++test.afterEach(() => {
++  resetHooks();
++  resetComboTraceStore();
++});
++
++test("runOnRoute returns null with no handlers", async () => {
++  assert.equal(await runOnRoute(ctx), null);
++});
++
++test("runOnRoute: first non-empty list wins, priority order", async () => {
++  registerHook("onRoute", "late", () => ({ models: ["b/late"] }), 20);
++  registerHook("onRoute", "early", () => ({ models: ["a/one", "a/two"] }), 10);
++  const r = await runOnRoute(ctx);
++  assert.deepEqual(r?.models, ["a/one", "a/two"]);
++});
++
++test("runOnRoute fails open: throw, empty, non-array and non-string entries are skipped", async () => {
++  registerHook(
++    "onRoute",
++    "boom",
++    () => {
++      throw new Error("x");
++    },
++    1
++  );
++  registerHook("onRoute", "empty", () => ({ models: [] }), 2);
++  registerHook("onRoute", "junk", () => ({ models: [1, 2] as unknown as string[] }), 3);
++  registerHook("onRoute", "none", () => undefined, 4);
++  registerHook("onRoute", "ok", () => ({ models: ["p/m"], reason: "r" }), 5);
++  const r = await runOnRoute(ctx);
++  assert.deepEqual(r?.models, ["p/m"]);
++});
++
++test("runOnRoute returns null when every handler declines", async () => {
++  registerHook(
++    "onRoute",
++    "boom",
++    () => {
++      throw new Error("x");
++    },
++    1
++  );
++  assert.equal(await runOnRoute(ctx), null);
++});
++
++test("runPluginOnRouteHook dedupes and caps the list, carrying reason/confidence", async () => {
++  const many = Array.from({ length: 30 }, (_, i) => `p/m${i}`);
++  registerHook(
++    "onRoute",
++    "p",
++    () => ({
++      models: ["p/m0", ...many],
++      reason: "jev",
++      confidence: 0.87,
++      thinking: { control: "effort", value: "high" },
++    }),
++    1
++  );
++  const out = await runPluginOnRouteHook({
++    requestId: "r2",
++    body: {},
++    model: "free",
++    apiKeyInfo: null,
++  });
++  assert.equal(out?.models.length, MAX_PLUGIN_ROUTE_MODELS);
++  assert.equal(new Set(out?.models).size, out?.models.length);
++  assert.equal(out?.models[0], "p/m0");
++  assert.equal(out?.reason, "jev");
++  assert.equal(out?.confidence, 0.87);
++  assert.deepEqual(out?.thinking, { control: "effort", value: "high" });
++});
++
++test("buildPluginRouteCombo has stored priority-combo shape, named after the request", () => {
++  const c = buildPluginRouteCombo(
++    "paid",
++    ["ocpaid/opencode/glm-5.3", "ocfree/opencode/space-bunny-free"],
++    "r3"
++  );
++  assert.equal(c.name, "paid");
++  assert.equal(c.strategy, "priority");
++  assert.deepEqual(
++    c.models.map((m) => m.model),
++    ["ocpaid/opencode/glm-5.3", "ocfree/opencode/space-bunny-free"]
++  );
++  assert.ok(c.models.every((m) => m.kind === "model" && m.id.startsWith("plugin-route-")));
++});
++
++test("buildPluginRouteCombo carries a trace invocation id", () => {
++  const a = buildPluginRouteCombo("paid", ["p/a"], "r4");
++  const b = buildPluginRouteCombo("paid", ["p/a"], "r5");
++  assert.match(String(a.traceInvocationId), /^combo-/);
++  assert.notEqual(a.traceInvocationId, b.traceInvocationId);
++});
++
++test("applyPluginRouteThinking writes effort and toggle without mutating input or max_tokens", () => {
++  const body: Record<string, unknown> = {
++    model: "paid",
++    max_tokens: 4096,
++    messages: [],
++    reasoning: { effort: "high", summary: "auto" },
++    output_config: { effort: "high" },
++  };
++  assert.equal(
++    applyPluginRouteThinking<Record<string, unknown>>(
++      { model: "x" },
++      { control: "effort", value: "medium" }
++    ).reasoning_effort,
++    "medium"
++  );
++  const effort = applyPluginRouteThinking(body, { control: "effort", value: "low" });
++  assert.equal(effort.reasoning_effort, "low");
++  assert.equal(effort.max_tokens, 4096); // output is never capped
++  assert.deepEqual(effort.reasoning, { summary: "auto" });
++  assert.equal(effort.output_config, undefined);
++  assert.equal(body.reasoning_effort, undefined); // copy only
++  assert.deepEqual(body.reasoning, { effort: "high", summary: "auto" });
++
++  const off = applyPluginRouteThinking<Record<string, unknown>>(
++    { model: "x", max_tokens: 100, reasoning_effort: "high" },
++    { control: "toggle", value: "off" }
++  );
++  assert.deepEqual(off, { model: "x", max_tokens: 100, thinking: { type: "disabled" } });
++  const on = applyPluginRouteThinking<Record<string, unknown>>(
++    { model: "x" },
++    { control: "toggle", value: "on" }
++  );
++  assert.deepEqual(on.thinking, { type: "enabled" });
++});
++
++test("applyPluginRouteThinking none clears a client-sent effort and never touches max_tokens", () => {
++  const body: Record<string, unknown> = {
++    model: "x",
++    max_tokens: 123,
++    reasoning_effort: "high",
++    reasoning: { effort: "high", summary: "auto" },
++    output_config: { effort: "high", format: "json" },
++    thinking: { type: "enabled" },
++  };
++  const out = applyPluginRouteThinking(body, { control: "none" });
++  assert.equal(out.reasoning_effort, undefined);
++  assert.deepEqual(out.reasoning, { summary: "auto" });
++  assert.deepEqual(out.output_config, { format: "json" });
++  assert.equal(out.thinking, undefined);
++  assert.equal(out.max_tokens, 123);
++  assert.equal(body.reasoning_effort, "high"); // copy only
++});
++
++test("applyPluginRouteThinking ignores malformed or budget-only controls", () => {
++  const body = { model: "x", reasoning_effort: "high" };
++  assert.equal(applyPluginRouteThinking(body, null), body);
++  assert.equal(applyPluginRouteThinking(body, { control: "max", value: "high" }), body);
++  assert.equal(applyPluginRouteThinking(body, { control: "toggle", value: "maybe" }), body);
++  assert.equal(applyPluginRouteThinking(body, { control: "budget", value: 4096 }), body); // omitted in v1
++});
++
++test("buildPluginRouteCombo carries the thinking control", () => {
++  const c = buildPluginRouteCombo("paid", ["a/x"], "r13", {
++    thinking: { control: "effort", value: "medium" },
++  });
++  assert.deepEqual(c.routeThinking, { control: "effort", value: "medium" });
++});
++
++test("buildPluginRouteHeaders: successful target, attempt count, jev reason and confidence", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x", "b/y"], "r8", {
++    reason: "jev",
++    confidence: 0.8765,
++  });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, {
++    target: "a/x",
++    ok: false,
++    status: 502,
++    kind: "provider",
++    latencyMs: 80,
++  });
++  recordComboOutcome(id, { target: "b/y", ok: true, status: 200, kind: null, latencyMs: 900 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "b/y",
++    "x-omniroute-attempts": "2",
++    "x-router-reason": "jev",
++    "x-router-confidence": "0.877",
++  });
++});
++
++test("buildPluginRouteHeaders: static keeps the reason but never the confidence", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x"], "r9", {
++    reason: "static:cont",
++    confidence: 0.9,
++  });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 10 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "a/x",
++    "x-omniroute-attempts": "1",
++    "x-router-reason": "static:cont",
++  });
++});
++
++test("buildPluginRouteHeaders: no success, unknown reason or bad confidence adds nothing unsafe", () => {
++  const combo = buildPluginRouteCombo("free", ["a/x"], "r10", {
++    reason: "jev:paid",
++    confidence: 2,
++  });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "free" });
++  recordComboOutcome(id, { target: "a/x", ok: false, status: 403, kind: "auth", latencyMs: 10 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {}); // no successful attempt
++  recordComboOutcome(id, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 20 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "a/x",
++    "x-omniroute-attempts": "2",
++  }); // reason not in the allowlist, confidence out of range
++});
++
++test("withPluginRouteHeaders stamps a Response and leaves failed/foreign combos untouched", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x"], "r11", { reason: "static" });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 10 });
++  const response = withPluginRouteHeaders(new Response("ok"), combo);
++  assert.equal(response.headers.get("x-omniroute-route"), "a/x");
++  assert.equal(response.headers.get("x-omniroute-attempts"), "1");
++  assert.equal(response.headers.get("x-router-reason"), "static");
++  assert.equal(response.headers.get("x-router-confidence"), null);
++
++  const other = buildPluginRouteCombo("paid", ["b/y"], "r12", { reason: "jev", confidence: 0.9 });
++  startComboTrace(String(other.traceInvocationId), { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(String(other.traceInvocationId), {
++    target: "b/y",
++    ok: false,
++    status: 500,
++    kind: "provider",
++    latencyMs: 10,
++  });
++  const failed = withPluginRouteHeaders(new Response("bad", { status: 502 }), other);
++  assert.equal(failed.headers.get("x-omniroute-route"), null);
++  assert.equal(failed.headers.get("x-router-reason"), null);
++});
++
++test("recordComboOutcome stores status/kind per attempt, in order", () => {
++  startComboTrace("inv-1", { strategy: "priority", comboName: "free" });
++  recordComboOutcome("inv-1", {
++    target: "ocfree/x",
++    ok: false,
++    status: 403,
++    kind: "auth",
++    latencyMs: 120,
++  });
++  recordComboOutcome("inv-1", {
++    target: "ocpv/y",
++    ok: true,
++    status: 200,
++    kind: null,
++    latencyMs: 900,
++  });
++  const t = getComboTrace("inv-1");
++  assert.deepEqual(
++    t?.outcomes.map((o) => [o.target, o.ok, o.status, o.kind]),
++    [
++      ["ocfree/x", false, 403, "auth"],
++      ["ocpv/y", true, 200, null],
++    ]
++  );
++  recordComboOutcome("unknown-invocation", {
++    target: "z",
++    ok: true,
++    status: 200,
++    kind: null,
++    latencyMs: 1,
++  }); // no throw
++});
++
++test("emitPluginRouteResult sends listed/attempts/skipped to onRouteResult handlers, fire-and-forget", async () => {
++  const combo = buildPluginRouteCombo("free", ["ocfree/x", "ocpv/y", "ocfree/z"], "r6");
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "free" });
++  recordComboDecision(id, {
++    step: "plugin-route-3",
++    target: "ocfree/z",
++    decision: "skipped_before_dispatch",
++    reason: "provider_cooldown",
++  });
++  recordComboOutcome(id, {
++    target: "ocfree/x",
++    ok: false,
++    status: 403,
++    kind: "auth",
++    latencyMs: 100,
++  });
++  recordComboOutcome(id, { target: "ocpv/y", ok: true, status: 200, kind: null, latencyMs: 800 });
++  let got: import("../../src/lib/plugins/hooks.ts").PluginRouteResultPayload | null = null;
++  registerHook(
++    "onRouteResult",
++    "p",
++    (payload: unknown) => {
++      got = payload;
++    },
++    1
++  );
++  emitPluginRouteResult({
++    requestId: "r6",
++    requestedModel: "free",
++    combo,
++    response: { status: 200 },
++  });
++  for (let i = 0; i < 20 && !got; i++) await new Promise((r) => setTimeout(r, 5));
++  assert.equal(got.requestId, "r6");
++  assert.equal(got.model, "free");
++  assert.equal(got.status, 200);
++  assert.deepEqual(got.listed, ["ocfree/x", "ocpv/y", "ocfree/z"]);
++  assert.deepEqual(
++    got.attempts.map(
++      (a: { model: string; ok: boolean; status: number | null; kind: string | null }) => [
++        a.model,
++        a.ok,
++        a.status,
++        a.kind,
++      ]
++    ),
++    [
++      ["ocfree/x", false, 403, "auth"],
++      ["ocpv/y", true, 200, null],
++    ]
++  );
++  assert.deepEqual(got.skipped, [{ model: "ocfree/z", reason: "provider_cooldown" }]);
++});
++
++test("emitPluginRouteResult swallows a throwing handler and a missing trace", async () => {
++  const combo = buildPluginRouteCombo("free", ["p/a"], "r7");
++  registerHook(
++    "onRouteResult",
++    "boom",
++    () => {
++      throw new Error("x");
++    },
++    1
++  );
++  assert.doesNotThrow(() =>
++    emitPluginRouteResult({
++      requestId: "r7",
++      requestedModel: "free",
++      combo,
++      response: { status: 502 },
++    })
++  ); // no trace yet
++  startComboTrace(String(combo.traceInvocationId), { strategy: "priority", comboName: "free" });
++  assert.doesNotThrow(() =>
++    emitPluginRouteResult({
++      requestId: "r7",
++      requestedModel: "free",
++      combo,
++      response: { status: 502 },
++    })
++  );
++  await new Promise((r) => setTimeout(r, 30));
++});
++
++// ── patch 0010: per-attempt thinking and menu item provenance ──
++
++test("0010: runPluginOnRouteHook keeps a per-attempt thinking map for listed targets only, and a plain item id", async () => {
++  registerHook(
++    "onRoute",
++    "p",
++    () => ({
++      models: ["a/x", "b/y"],
++      reason: "jev",
++      confidence: 0.9,
++      item: "P3",
++      specialist: false,
++      thinking: { control: "none" },
++      thinking_by_model: {
++        "a/x": { control: "effort", value: "high" },
++        "b/y": { control: "none" },
++        "z/not-listed": { control: "effort", value: "max" },
++      },
++    }),
++    1
++  );
++  const out = await runPluginOnRouteHook({
++    requestId: "r20",
++    body: {},
++    model: "paid",
++    apiKeyInfo: null,
++  });
++  assert.deepEqual(out?.thinkingByModel, {
++    "a/x": { control: "effort", value: "high" },
++    "b/y": { control: "none" },
++  });
++  assert.equal(out?.item, "P3");
++  assert.equal(out?.specialist, false);
++});
++
++test("0010: malformed per-attempt entries and item ids are dropped, never echoed", async () => {
++  registerHook(
++    "onRoute",
++    "p",
++    () => ({
++      models: ["a/x", "b/y"],
++      item: "P3\r\nx-evil: 1",
++      thinking_by_model: {
++        "a/x": { control: "toggle", value: "high" },
++        "b/y": { control: "effort", value: "x".repeat(40) },
++      },
++    }),
++    1
++  );
++  const out = await runPluginOnRouteHook({
++    requestId: "r21",
++    body: {},
++    model: "paid",
++    apiKeyInfo: null,
++  });
++  assert.equal(out?.thinkingByModel, undefined);
++  assert.equal(out?.item, undefined);
++});
++
++test("0010: each attempt gets its own model's value; a target the map leaves out is sent with none; no map = 0008", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x", "b/y", "c/z"], "r22", {
++    thinking: { control: "effort", value: "low" },
++    thinkingByModel: {
++      "a/x": { control: "effort", value: "low" },
++      "b/y": { control: "toggle", value: "on" },
++    },
++  });
++  assert.deepEqual(pluginAttemptThinking(combo, "a/x"), { control: "effort", value: "low" });
++  assert.deepEqual(pluginAttemptThinking(combo, "b/y"), { control: "toggle", value: "on" });
++  assert.deepEqual(pluginAttemptThinking(combo, "c/z"), { control: "none" });
++  const client = { model: "paid", reasoning_effort: "high", messages: [] };
++  assert.deepEqual(applyPluginRouteThinking(client, pluginAttemptThinking(combo, "a/x")), {
++    model: "paid",
++    reasoning_effort: "low",
++    messages: [],
++  });
++  assert.deepEqual(applyPluginRouteThinking(client, pluginAttemptThinking(combo, "b/y")), {
++    model: "paid",
++    messages: [],
++    thinking: { type: "enabled" },
++  });
++  assert.deepEqual(applyPluginRouteThinking(client, pluginAttemptThinking(combo, "c/z")), {
++    model: "paid",
++    messages: [],
++  });
++  assert.equal(client.reasoning_effort, "high", "the shared body is never mutated");
++  const old = buildPluginRouteCombo("paid", ["a/x", "b/y"], "r23", {
++    thinking: { control: "effort", value: "high" },
++  });
++  assert.equal(old.routeThinkingByModel, undefined);
++  assert.deepEqual(pluginAttemptThinking(old, "b/y"), { control: "effort", value: "high" });
++});
++
++test("0010: headers name the item and the thinking of the attempt that answered", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x", "b/y"], "r24", {
++    reason: "jev",
++    confidence: 0.9,
++    item: "P3",
++    specialist: false,
++    thinkingByModel: { "a/x": { control: "effort", value: "high" }, "b/y": { control: "none" } },
++  });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, {
++    target: "a/x",
++    ok: false,
++    status: 503,
++    kind: "provider",
++    latencyMs: 50,
++  });
++  recordComboOutcome(id, { target: "b/y", ok: true, status: 200, kind: null, latencyMs: 700 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "b/y",
++    "x-omniroute-attempts": "2",
++    "x-router-reason": "jev",
++    "x-router-confidence": "0.9",
++    "x-router-item": "P3",
++    "x-router-specialist": "no",
++    "x-router-thinking": "default",
++  });
++  const head = buildPluginRouteCombo("paid", ["a/x"], "r25", {
++    reason: "static",
++    item: "S4",
++    specialist: true,
++    thinkingByModel: { "a/x": { control: "effort", value: "max" } },
++  });
++  const hid = String(head.traceInvocationId);
++  startComboTrace(hid, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(hid, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 100 });
++  assert.equal(buildPluginRouteHeaders(head)["x-router-thinking"], "max");
++  assert.equal(buildPluginRouteHeaders(head)["x-router-item"], "S4");
++  assert.equal(buildPluginRouteHeaders(head)["x-router-specialist"], "yes");
++  // a specialist flag without an item is never echoed
++  const bare = buildPluginRouteCombo("paid", ["a/x"], "r27", {
++    reason: "static",
++    specialist: true,
++  });
++  const bid = String(bare.traceInvocationId);
++  startComboTrace(bid, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(bid, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 100 });
++  assert.equal(buildPluginRouteHeaders(bare)["x-router-specialist"], undefined);
++});
++
++test("0010: a plugin that sends neither item nor thinking gets the 0007 headers unchanged", () => {
++  const combo = buildPluginRouteCombo("paid", ["a/x"], "r26", { reason: "static" });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 100 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "a/x",
++    "x-omniroute-attempts": "1",
++    "x-router-reason": "static",
++  });
++});
++
++test("0010: a spent per-model allowance is flagged on the attempt (never its text); a short rate limit is not", async () => {
++  const { isUsageLimitError } =
++    await import("../../open-sse/services/combo/comboErrorAggregation.ts");
++  assert.equal(
++    isUsageLimitError(
++      429,
++      "Free usage limit reached. Free models work in OpenCode; subscribe to OpenCode Go to keep going"
++    ),
++    true
++  );
++  assert.equal(
++    isUsageLimitError(
++      429,
++      '{"error":{"type":"UsageLimitError","message":"Usage limit reached for this model"}}'
++    ),
++    true
++  );
++  assert.equal(isUsageLimitError(429, "monthly quota exceeded"), true);
++  assert.equal(isUsageLimitError(402, "insufficient balance"), true);
++  assert.equal(isUsageLimitError(429, "Rate limit exceeded. Please try again later."), false);
++  assert.equal(isUsageLimitError(503, "usage limit reached"), false);
++  assert.equal(isUsageLimitError(200, "usage limit"), false);
++
++  const combo = buildPluginRouteCombo("paid", ["a/x", "b/y"], "r30", { reason: "jev" });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "paid" });
++  recordComboOutcome(id, {
++    target: "a/x",
++    ok: false,
++    status: 429,
++    kind: "rate_limit",
++    latencyMs: 40,
++    limit: true,
++  });
++  recordComboOutcome(id, { target: "b/y", ok: true, status: 200, kind: null, latencyMs: 500 });
++  let got: import("../../src/lib/plugins/hooks.ts").PluginRouteResultPayload | null = null;
++  registerHook(
++    "onRouteResult",
++    "p",
++    (payload: unknown) => {
++      got = payload;
++    },
++    1
++  );
++  emitPluginRouteResult({
++    requestId: "r30",
++    requestedModel: "paid",
++    combo,
++    response: { status: 200 },
++  });
++  for (let i = 0; i < 20 && !got; i++) await new Promise((r) => setTimeout(r, 5));
++  assert.deepEqual(
++    got.attempts.map((a: { limit?: boolean }) => a.limit),
++    [true, undefined]
++  );
++  assert.ok(
++    !JSON.stringify(got).toLowerCase().includes("usage limit"),
++    "no error text reaches the plugin"
++  );
++});
+diff --git a/tests/unit/plugins-welcome-banner-e2e.test.ts b/tests/unit/plugins-welcome-banner-e2e.test.ts
+index e03efd15..65055393 100644
+--- a/tests/unit/plugins-welcome-banner-e2e.test.ts
++++ b/tests/unit/plugins-welcome-banner-e2e.test.ts
+@@ -319,6 +319,9 @@ test("plugin hooks system", async (t) => {
+   await t.test("BUILTIN_EVENTS contains only emitted/public plugin events", () => {
+     assert.deepEqual(BUILTIN_EVENTS, [
+       "onRequest",
++      // jev-router: pre-resolution routing hooks (runOnRoute / runOnRouteResult from chat.ts)
++      "onRoute",
++      "onRouteResult",
+       "onResponse",
+       "onError",
+       "onInstall",
+-- 
+2.47.3
+
