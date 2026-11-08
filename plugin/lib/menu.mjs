@@ -266,7 +266,7 @@ export function attemptsFor(item, { menu, facts, req, deny = [], health = null }
  * applies (the pool default, or the first eligible item). `streak` counts consecutive turns Jev rated simpler.
  * Returns {item, source, reason, streak}.
  */
-export function stickyChoice({ last, pick, ok, fallback, streak = 0, cfg = DEFAULT_STICKY }) {
+export function stickyChoice({ last, pick, ok, fallback, streak = 0, cfg = DEFAULT_STICKY, cold = false }) {
   const can = (it) => !!it && ok.has(it.id);
   if (!can(last)) {
     if (pick) return { item: pick, source: "jev", reason: last ? "last_ineligible" : "new", streak: 0 };
@@ -275,6 +275,9 @@ export function stickyChoice({ last, pick, ok, fallback, streak = 0, cfg = DEFAU
   if (!pick) return { item: last, source: "session", reason: "unconfident", streak: 0 };
   if (pick.id === last.id) return { item: last, source: "jev", reason: "same", streak: 0 };
   if (pick.model === last.model && !cfg.effort_change_is_switch) return { item: pick, source: "jev", reason: "effort_change", streak: 0 };
+  // UP-13/COLD: the call's prompt prefix is being rebuilt anyway (a fold or an idle gap), so a model switch costs
+  // no extra cache miss; a confident pick stands at once instead of holding behind the downgrade wait.
+  if (cold && ok.has(pick.id)) return { item: pick, source: "jev", reason: "cold_prefix", streak: 0 };
   if (pick.rank >= last.rank) return { item: pick, source: "jev", reason: "task_changed", streak: 0 };
   const n = streak + 1;
   if (n >= cfg.downgrade_after) return { item: pick, source: "jev", reason: "simpler_confirmed", streak: 0 };

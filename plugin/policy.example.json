@@ -538,7 +538,10 @@
   "sample_file": "shadow-samples.jsonl",
   "sample_chars": 300,
   "skip_sessions": [
-   "canary"
+   "canary",
+   "memory-summary",
+   "memory-side-look",
+   "memory-reflection"
   ],
   "sources": [
    {

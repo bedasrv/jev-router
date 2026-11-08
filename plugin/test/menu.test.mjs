@@ -220,6 +220,18 @@ test("UP-10c sticky: effort_change_is_switch treats a same-model effort change l
   assert.equal(stickyChoice({ last: items.P4, pick: items.P1, ok, fallback: items.P2, cfg }).reason, "simpler_wait");
   assert.equal(stickyChoice({ last: items.P1, pick: items.P4, ok, fallback: items.P2, cfg }).reason, "task_changed");
 });
+test("UP-13 cold-prefix: a confident pick stands at once on a rebuilt prefix; without the cold flag the two-turn wait stands", () => {
+  const items = Object.fromEntries(MENU.items.map((i) => [i.id, i]));
+  const ok = new Set(Object.keys(items));
+  const cfg = { ...DEFAULT_STICKY, effort_change_is_switch: true };
+  // a switch to a simpler item (rank drops) stands at once on a cold boundary; warm it waits
+  assert.equal(stickyChoice({ last: items.P4, pick: items.P6, ok, fallback: items.P2, cfg, cold: true }).reason, "cold_prefix");
+  assert.equal(stickyChoice({ last: items.P4, pick: items.P6, ok, fallback: items.P2, cfg }).reason, "simpler_wait");
+  // a same-model effort change stands cold or warm
+  assert.equal(stickyChoice({ last: items.P1, pick: items.P4, ok, fallback: items.P2, cold: true }).reason, "effort_change");
+  // a cold call does not unhold an unconfident turn
+  assert.equal(stickyChoice({ last: items.P4, pick: null, ok, fallback: items.P2, cold: true }).reason, "unconfident");
+});
 
 test("UP-10c: Jev unavailable keeps the conversation's item, else the pool default; a new conversation gets the default", async () => {
   const { r, jev, logs } = mk();
@@ -238,6 +250,29 @@ test("UP-10c: Jev unavailable keeps the conversation's item, else the pool defau
   assert.equal(logs().at(-1).source, "session");
 });
 
+test("UP-13 cold-prefix: a fresh-pick switch at ordinary confidence stands on a cold boundary; the warm one keeps the stricter switch_threshold", async () => {
+  const { r, jev, logs } = mk();
+  const conv = "cold1";
+  jev.answer("P3"); await r.onRoute(turn("paid", "a", { conv }));
+  const hist = followUp(1);
+  jev.answer("P4", 0.7); // confident enough for a fresh pick (thr 0.6), not enough to leave the last item (switch_threshold 0.85)
+  const cold = await r.onRoute(turn("paid", "b", { conv, history: hist, headers: { "x-warslop-prompt-cache": "cold" } }));
+  assert.equal(cold.item, "P4");
+  assert.equal(logs().at(-1).sticky, "cold_prefix");
+  assert.equal(logs().at(-1).prompt_cache, "cold");
+  // the same position without the header: the switch is held (switch_held), the last item stays
+  const conv2 = "warm1";
+  jev.answer("P3"); await r.onRoute(turn("paid", "c", { conv: conv2 }));
+  jev.answer("P4", 0.7);
+  const warm = await r.onRoute(turn("paid", "d", { conv: conv2, history: followUp(1) }));
+  assert.equal(warm.item, "P3");
+  assert.equal(logs().at(-1).jev.outcome, "switch_held");
+  assert.equal(logs().at(-1).sticky, "unconfident");
+  // and one confident enough to switch anyway still stands on warm
+  jev.answer("P4", 0.9);
+  const warm2 = await r.onRoute(turn("paid", "e", { conv: conv2, history: followUp(2) }));
+  assert.equal(warm2.item, "P4");
+});
 test("UP-10c: API calls (session v<voucher>) are never sticky; canary sessions are never sent to Jev", async () => {
   const { r, jev } = mk();
   jev.answer("P3"); assert.equal((await r.onRoute(turn("paid", "a", { conv: "v42" }))).item, "P3");

@@ -76,6 +76,9 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
    * rules; otherwise the last item stays, else the pool default. Every attempt carries its own native thinking.
    */
   async function decideMenu(ctx, { pool, policy, body, req, key, fresh, known, api }) {
+    // UP-13: the app sends x-warslop-prompt-cache: cold on the first call of a turn whose prefix is being rebuilt
+    // (a fold or an idle gap). The miss happens either way, so a switch is free; only this boundary carries the header.
+    const coldPrefix = headerValue(ctx.headers, "x-warslop-prompt-cache") === "cold";
     const menu = policy.menu;
     const f = factsSrc.get(policy);
     const deny = policy.denylist ?? [];
@@ -112,7 +115,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
         // Lead 2026-11-05: a fresh pick stands at menu.threshold; leaving the conversation's last item still needs
         // menu.switch_threshold (the stricter rule switches had), so a lower fresh threshold does not make chats jumpy.
         const switching = !!picked && !!previous && picked.id !== last.id;
-        const need = switching ? Math.max(thr, menu.switch_threshold ?? thr) : thr;
+        const need = switching && !coldPrefix ? Math.max(thr, menu.switch_threshold ?? thr) : thr;
         const held = switching && res.confidence >= thr && res.confidence < need;
         const confident = !!picked && res.confidence >= need && kindOk;
         if (confident && cfg.mode === "on") pick = picked;
@@ -123,7 +126,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       }
       // Stateless API calls (session v<voucher>) have no conversation to stick to; each call stands alone.
       choice = api ? (pick ? { item: pick, source: "jev", reason: "api", streak: 0 } : { item: fallback, source: "default", reason: "api", streak: 0 })
-        : stickyChoice({ last, pick, ok, fallback, streak: known?.streak ?? 0, cfg: stickyCfg(menu) });
+        : stickyChoice({ last, pick, ok, fallback, streak: known?.streak ?? 0, cfg: stickyCfg(menu), cold: coldPrefix });
       if (jevInfo && !jevInfo.ok) choice = { ...choice, reason: choice.reason === "unconfident" ? "jev_unavailable" : choice.reason };
       if (skipped) choice = { ...choice, reason: `${choice.reason}:skip_session` };
     }
@@ -140,6 +143,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     log({
       event: "decision", menu: true, id: ctx.requestId ?? null, pool, conv: hash(key), fresh, est_tokens: req.tokens, tools: req.usesTools, images: req.images,
       item: choice.item.id, specialist, model: attempts[0].model, thinking: thinkingWord(attempts[0].thinking),
+      prompt_cache: coldPrefix ? "cold" : undefined,
       cost_ratio: turnCostRatio(choice.item, { menu, req, body }) ?? undefined,
       attempts: attempts.map((a) => ({ m: a.model, thinking: thinkingWord(a.thinking), from: a.from })),
       source: choice.source, sticky: choice.reason, streak: choice.streak || undefined, last: last?.id,

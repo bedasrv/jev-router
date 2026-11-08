@@ -1,7 +1,7 @@
 {
  "name": "jev-router",
- "version": "0.10.0",
- "description": "Pre-resolution model routing for the free/paid pools (UP-10c: Jev picks a (model + thinking) pair from the policy menu; per-attempt thinking via patch 0010; per-route windows via patch 0011)",
+ "version": "0.11.0",
+ "description": "Pre-resolution model routing for the free/paid pools (UP-10c: Jev picks a (model + thinking) pair from the policy menu; per-attempt thinking via patch 0010; per-route windows via patch 0011; cold-prefix fact in the sticky rule via 0.11.0)",
  "main": "index.mjs",
  "enabledByDefault": true,
  "requires": {
