@@ -10,6 +10,7 @@ import { applyThinkingToList, minFallbacks, toHostThinking } from "./lib/thinkin
 import { createHealth } from "./lib/health.mjs";
 import { conversationKey, isFresh, createSessions, hash, headerValue, isApiSession } from "./lib/sessions.mjs";
 import { createLog } from "./lib/decision-log.mjs";
+import { windowsFor } from "./lib/windows.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEADLINE_MS = 3500; // OmniRoute kills the child at 5 s and never respawns it
@@ -131,6 +132,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     if (!attempts.length) return undefined;
     sessions.set(key, { item: choice.item.id, head: attempts[0].model, streak: choice.streak }, now());
     const models = attempts.map((a) => a.model);
+    const windows = windowsFor(models, f);
     const byModel = Object.fromEntries(attempts.map((a) => [a.model, hostThinking(a.thinking)]));
     const values = new Set(attempts.map((a) => JSON.stringify(a.thinking)));
     const specialist = choice.item.specialist === true;
@@ -156,6 +158,8 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       // model's value to another.
       thinking_by_model: byModel,
       thinking: values.size === 1 ? hostThinking(attempts[0].thinking) : { control: "none" },
+      // Patch 0011: each dispatch id's own window, so the host can echo the answering route's figures.
+      ...(windows ? { windows_by_model: windows } : {}),
     };
   }
 
@@ -239,6 +243,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     });
     // Response-header provenance (patch 0007): reason is jev | static[:cont]; confidence
     // only when Jev's pick was applied. The pool itself is already the request model.
+    const windows = windowsFor(models, f);
     return {
       models,
       reason: jevInfo ? "jev" : !fresh ? "static:cont" : sticky ? "static:sticky" : "static",
@@ -246,6 +251,8 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       // Applied native control as {control, value} (the 0008 wire shape; the log keeps `native`),
       // or an explicit none/clear when normal/free/no mapping wins.
       ...(effortInfo ? { thinking: toHostThinking(effortInfo.applied) } : {}),
+      // Patch 0011: each dispatch id's own window, so the host can echo the answering route's figures.
+      ...(windows ? { windows_by_model: windows } : {}),
     };
   }
 

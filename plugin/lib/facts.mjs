@@ -21,6 +21,7 @@ export function createFacts({ fetchImpl = fetch, readFile = (f) => fs.readFileSy
       listed.set(`${src.prefix}/${m.id}`, {
         context_length: m.context_length ?? undefined,
         max_input_tokens: m.max_input_tokens ?? undefined,
+        max_output_tokens: m.max_output_tokens ?? undefined,
         tools: m.capabilities?.tool_calling ?? undefined,
         vision: Array.isArray(m.input_modalities) ? m.input_modalities.includes("image") : undefined,
       });

@@ -58,6 +58,46 @@ test("every plan the example policy can produce reaches the wire intact", () => 
   assert.ok(applied > 0, "the example policy should apply at least one real control");
 });
 
+// Patch 0011: the menu's per-route windows go through the same wire shape the host's normalizeWindowsByModel
+// (read from the patch) accepts, or the host drops them silently. The figures must survive integer-valued and
+// capped; the host keeps only the dispatched targets.
+function hostWindowsNormalizer() {
+  const file = fs.readdirSync(PATCHES).find((f) => f.startsWith("0011-"));
+  assert.ok(file, "patch 0011 not found");
+  const lines = fs.readFileSync(path.join(PATCHES, file), "utf8").split("\n");
+  const start = lines.findIndex((l) => l.startsWith("+const MAX_WINDOW_TOKENS"));
+  const fn = lines.findIndex((l) => l.startsWith("+function normalizeWindowsByModel"));
+  assert.ok(start >= 0 && fn > start, "normalizeWindowsByModel not found in patch 0011");
+  const end = lines.findIndex((l, i) => i > fn && l === "+}");
+  const ts = lines.slice(start, end + 1).map((l) => l.slice(1)).join("\n");
+  // Strip the TypeScript: signatures, the two Record<> annotations and the two `as Record<>` casts.
+  const js = ts
+    .replace("function normalizeWindowFigure(value: unknown): number | null", "function normalizeWindowFigure(value)")
+    .replace(/function normalizeWindowsByModel\(\s*value: unknown,\s*models: string\[\]\s*\): Record<string, PluginRouteWindow> \| null/m, "function normalizeWindowsByModel(value, models)")
+    .replace("const out: Record<string, PluginRouteWindow> = {}", "const out = {}")
+    .replace("const entry: PluginRouteWindow = {}", "const entry = {}")
+    .replace(/\(value as Record<string, unknown>\)/g, "value")
+    .replace(/\(raw as Record<string, unknown>\)/g, "raw")
+    .replace("const record = raw as Record<string, unknown>;", "const record = raw;");
+  return new Function(`${js}\nreturn normalizeWindowsByModel;`)();
+}
+
+test("UP-13 / 0011: every window the plugin sends survives the host unchanged; garbage does not", async () => {
+  const { windowsFor } = await import("../lib/windows.mjs");
+  const normalizeWindowsByModel = hostWindowsNormalizer();
+  const DS = "ocpaid/opencode-go/deepseek-v4.1-flash", BEAM = "ocpaid/opencode-go/beam-free", GLM = "ocpaid/opencode-go/glm-5.3-flash";
+  const facts = {
+    [DS]: { context_length: 1000000, max_output_tokens: 65536 },
+    [BEAM]: { context_length: 262144 },
+    [GLM]: {},
+  };
+  const models = [DS, BEAM, GLM];
+  const wire = windowsFor(models, facts);
+  assert.deepEqual(normalizeWindowsByModel(wire, models), wire);
+  assert.equal(normalizeWindowsByModel({ [DS]: { context_length: "128000" } }, models), null); // not finite numbers
+  assert.deepEqual(normalizeWindowsByModel({ [GLM]: { context_length: 100 }, "other/z": { context_length: 100 } }, models), { [GLM]: { context_length: 100 } }); // only dispatched targets
+});
+
 // Patch 0010: the menu's per-attempt values go through the same normalizer, and the item id must match the host's
 // ITEM_ID (read from the patch), or the host drops the map / the x-router-item header silently.
 test("UP-10c / 0010: every menu pair and item id survives the host unchanged", async () => {
