@@ -153,12 +153,13 @@ jobs:
       # them; without them this step is skipped). A green build closes the stale patch-conflict
       # issue for the tag it just built, so fixed breaks do not stay open.
       - name: Page on failure
-        if: failure() && secrets.TELEGRAM_BOT_TOKEN != ''
+        if: failure()
         env:
           TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           IMAGE_TAG: ${{ steps.ver.outputs.image_tag }}
         run: |
+          [ -n "$TG_BOT" ] || { echo "no Telegram secret; skipping page"; exit 0; }
           text="jev-router build FAILED for $IMAGE_TAG: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TG_BOT" |
             curl -sS -m 10 -K - -o /dev/null -w '%{http_code}\n' --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$text" --data-urlencode "disable_web_page_preview=true"
