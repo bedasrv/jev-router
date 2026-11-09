@@ -4,6 +4,12 @@ name: Build patched OmniRoute
 # exist yet, apply patches/, run the plugin tests, build the amd64 runner-web image and push it
 # with provenance + SBOM. A patch that no longer applies opens an issue and stops; the previous
 # image stays live. A patch that upstream already contains is dropped automatically.
+#
+# Image tags are immutable (safety audit F11, 2026-11-09): this workflow never pushes over an
+# existing <ver>-jev<rev>, so a tag's provenance cannot be silently replaced. A rebuild therefore
+# needs a new JEV_REV, which makes a new tag; there is no force input. A run that finds its tag
+# already published records that tag's digest in the step summary and changes nothing. If the
+# registry cannot say whether the tag exists, the run stops instead of building over it.
 on:
   schedule:
     - cron: "17 5 * * *"
@@ -13,11 +19,6 @@ on:
         description: "Upstream tag to build (default: newest stable release)"
         required: false
         type: string
-      force:
-        description: "Rebuild even if the image tag already exists"
-        required: false
-        type: boolean
-        default: false
   push:
     branches: [master]
     paths: ["patches/**", "JEV_REV", "scripts/**", ".github/workflows/build.yml"]
@@ -65,15 +66,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Skip if this image tag already exists
+      - name: Skip when this image tag already exists (tags are immutable)
         id: exists
-        env:
-          FORCE: ${{ inputs.force }}
         run: |
-          if [ "$FORCE" != "true" ] && docker buildx imagetools inspect "$IMAGE:${{ steps.ver.outputs.image_tag }}" >/dev/null 2>&1; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "$IMAGE:${{ steps.ver.outputs.image_tag }} exists; nothing to do"
-          else
+          ref="$IMAGE:${{ steps.ver.outputs.image_tag }}"
+          if out=$(docker buildx imagetools inspect "$ref" 2>&1); then
+            digest="$(printf '%s\n' "$out" | awk '/^Digest:/{print $2; exit}')"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "$ref already exists at ${digest:-unknown digest}; not rebuilding it"
+            {
+              echo "### $ref already exists — nothing was rebuilt"
+              echo "previous digest: \`${digest:-unknown}\` (tag unchanged)"
+              echo "Tags are immutable: bump \`JEV_REV\` and push to publish a new tag."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif printf '%s\n' "$out" | grep -qiE 'not found|manifest unknown|name_unknown'; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "$ref does not exist yet; building it"
+          else
+            echo "could not tell whether $ref exists; refusing to build over an unknown tag:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
           fi
 
       - uses: actions/setup-node@v4
