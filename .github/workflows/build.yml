@@ -147,3 +147,28 @@ jobs:
             echo "digest: \`${{ steps.push.outputs.digest }}\`"
             echo "pin it: \`image: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Audit 2026-11-09: the v3.8.53 CI break stayed red ~4 days with no page. Any failure now
+      # pages Telegram when the repo secrets TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID exist (owner adds
+      # them; without them this step is skipped). A green build closes the stale patch-conflict
+      # issue for the tag it just built, so fixed breaks do not stay open.
+      - name: Page on failure
+        if: failure() && secrets.TELEGRAM_BOT_TOKEN != ''
+        env:
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_BOT: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          IMAGE_TAG: ${{ steps.ver.outputs.image_tag }}
+        run: |
+          text="jev-router build FAILED for $IMAGE_TAG: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TG_BOT" |
+            curl -sS -m 10 -K - -o /dev/null -w '%{http_code}\n' --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$text" --data-urlencode "disable_web_page_preview=true"
+
+      - name: Close fixed patch issues on success
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          for n in $(gh issue list --state open --search "Patch does not apply to upstream $UPSTREAM_TAG in:title" --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "Superseded: upstream $UPSTREAM_TAG built green in run ${{ github.run_id }}."
+          done
