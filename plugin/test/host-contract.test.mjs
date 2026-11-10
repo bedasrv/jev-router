@@ -5,20 +5,27 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ABSTRACT_LEVELS, applyThinkingToList, toHostThinking } from "../lib/thinking.mjs";
 
-// Contract with OmniRoute: the onRoute `thinking` field must survive patch 0008's
+// Contract with OmniRoute: the onRoute `thinking` field must survive the host's
 // normalizePluginThinking, which silently drops any other shape (0.7.0 sent `native` and every
-// effort/toggle selection was dropped). The normalizer is read from the patch itself, so a change
-// on either side fails here instead of in production.
+// effort/toggle selection was dropped). The normalizer is read from the patch that defines it, so a
+// change on either side fails here instead of in production. A patch number is not a stable address:
+// the v3.8.53 re-author folded the whole series into 0001, so the definition is found by symbol.
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PATCHES = path.join(HERE, "..", "..", "patches");
 const policyExample = JSON.parse(fs.readFileSync(path.join(HERE, "..", "policy.example.json"), "utf8"));
 
+/** The text of the patch that defines `symbol`; patches apply in order, so the last one wins. */
+function patchDefining(symbol) {
+  const files = fs.readdirSync(PATCHES).filter((f) => f.endsWith(".patch")).sort();
+  const file = files.filter((f) => fs.readFileSync(path.join(PATCHES, f), "utf8").includes(symbol)).pop();
+  assert.ok(file, `no patch defines ${symbol}`);
+  return fs.readFileSync(path.join(PATCHES, file), "utf8");
+}
+
 function hostNormalizer() {
-  const file = fs.readdirSync(PATCHES).find((f) => f.startsWith("0008-"));
-  assert.ok(file, "patch 0008 not found");
-  const lines = fs.readFileSync(path.join(PATCHES, file), "utf8").split("\n");
+  const lines = patchDefining("+function normalizePluginThinking(").split("\n");
   const start = lines.findIndex((l) => l.startsWith("+function normalizePluginThinking("));
-  assert.ok(start >= 0, "normalizePluginThinking not found in patch 0008");
+  assert.ok(start >= 0, "normalizePluginThinking not found in the patch series");
   const end = lines.findIndex((l, i) => i > start && l === "+}");
   const ts = lines.slice(start, end + 1).map((l) => l.slice(1)).join("\n");
   // Strip the only TypeScript in it: the signature types and one `as` cast.
@@ -58,16 +65,14 @@ test("every plan the example policy can produce reaches the wire intact", () => 
   assert.ok(applied > 0, "the example policy should apply at least one real control");
 });
 
-// Patch 0011: the menu's per-route windows go through the same wire shape the host's normalizeWindowsByModel
-// (read from the patch) accepts, or the host drops them silently. The figures must survive integer-valued and
-// capped; the host keeps only the dispatched targets.
+// The menu's per-route windows go through the same wire shape the host's normalizeWindowsByModel
+// (read from the patch that defines it) accepts, or the host drops them silently. The figures must survive
+// integer-valued and capped; the host keeps only the dispatched targets.
 function hostWindowsNormalizer() {
-  const file = fs.readdirSync(PATCHES).find((f) => f.startsWith("0011-"));
-  assert.ok(file, "patch 0011 not found");
-  const lines = fs.readFileSync(path.join(PATCHES, file), "utf8").split("\n");
+  const lines = patchDefining("+function normalizeWindowsByModel").split("\n");
   const start = lines.findIndex((l) => l.startsWith("+const MAX_WINDOW_TOKENS"));
   const fn = lines.findIndex((l) => l.startsWith("+function normalizeWindowsByModel"));
-  assert.ok(start >= 0 && fn > start, "normalizeWindowsByModel not found in patch 0011");
+  assert.ok(start >= 0 && fn > start, "normalizeWindowsByModel not found in the patch series");
   const end = lines.findIndex((l, i) => i > fn && l === "+}");
   const ts = lines.slice(start, end + 1).map((l) => l.slice(1)).join("\n");
   // Strip the TypeScript: signatures, the two Record<> annotations and the two `as Record<>` casts.
@@ -82,7 +87,7 @@ function hostWindowsNormalizer() {
   return new Function(`${js}\nreturn normalizeWindowsByModel;`)();
 }
 
-test("UP-13 / 0011: every window the plugin sends survives the host unchanged; garbage does not", async () => {
+test("UP-13: every window the plugin sends survives the host unchanged; garbage does not", async () => {
   const { windowsFor } = await import("../lib/windows.mjs");
   const normalizeWindowsByModel = hostWindowsNormalizer();
   const DS = "ocpaid/opencode-go/deepseek-v4.1-flash", BEAM = "ocpaid/opencode-go/beam-free", GLM = "ocpaid/opencode-go/glm-5.3-flash";
@@ -98,16 +103,16 @@ test("UP-13 / 0011: every window the plugin sends survives the host unchanged; g
   assert.deepEqual(normalizeWindowsByModel({ [GLM]: { context_length: 100 }, "other/z": { context_length: 100 } }, models), { [GLM]: { context_length: 100 } }); // only dispatched targets
 });
 
-// Patch 0010: the menu's per-attempt values go through the same normalizer, and the item id must match the host's
-// ITEM_ID (read from the patch), or the host drops the map / the x-router-item header silently.
-test("UP-10c / 0010: every menu pair and item id survives the host unchanged", async () => {
+// The menu's per-attempt values go through the same normalizer, and the item id must match the host's
+// ITEM_ID (read from the patch that defines it), or the host drops the map / the x-router-item header silently.
+test("UP-10c: every menu pair and item id survives the host unchanged", async () => {
   const { hostThinking } = await import("../lib/menu.mjs");
   const menu = JSON.parse(fs.readFileSync(path.join(HERE, "..", "ops", "menu.example.json"), "utf8"));
-  const file = fs.readdirSync(PATCHES).find((f) => f.startsWith("0010-"));
-  assert.ok(file, "patch 0010 not found");
-  const text = fs.readFileSync(path.join(PATCHES, file), "utf8");
-  const re = new RegExp(text.match(/^\+const ITEM_ID = \/(.+)\/;$/m)[1]);
-  assert.ok(text.includes("thinking_by_model"), "0010 reads thinking_by_model");
+  const text = patchDefining("+const ITEM_ID = /");
+  const itemId = text.match(/^\+const ITEM_ID = \/(.+)\/;$/m);
+  assert.ok(itemId, "ITEM_ID not found in the patch series");
+  const re = new RegExp(itemId[1]);
+  assert.ok(text.includes("thinking_by_model"), "the menu patch reads thinking_by_model");
   for (const it of menu.items) {
     assert.ok(re.test(it.id), `item id ${it.id}`);
     const wire = hostThinking(it.thinking);
