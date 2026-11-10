@@ -1,4 +1,4 @@
-From 19f277f2602f6710c358aead46dedfa7ecf51e28 Mon Sep 17 00:00:00 2001
+From e5427c2aeeec19279fe529c058bf03002569c209 Mon Sep 17 00:00:00 2001
 From: bedasrv <bedasrv@warslop-dev>
 Date: Sun, 8 Nov 2026 20:36:56 +0700
 Subject: [PATCH] plugins: onRoute + onRouteResult re-authored for upstream
@@ -43,12 +43,12 @@ core typecheck clean.
  src/lib/plugins/pluginRegistration.ts         |   2 +
  src/lib/plugins/sdk.ts                        |  22 +-
  src/sse/handlers/chat.ts                      |  55 +-
- src/sse/handlers/chat/pluginOnRoute.ts        | 432 +++++++++++++
+ src/sse/handlers/chat/pluginOnRoute.ts        | 437 +++++++++++++
  tests/unit/earlyStreamKeepalive.test.ts       | 119 +++-
  tests/unit/per-route-window.test.ts           | 266 ++++++++
- tests/unit/plugins-onroute.test.ts            | 605 ++++++++++++++++++
+ tests/unit/plugins-onroute.test.ts            | 617 ++++++++++++++++++
  tests/unit/plugins-welcome-banner-e2e.test.ts |   3 +
- 18 files changed, 1799 insertions(+), 12 deletions(-)
+ 18 files changed, 1816 insertions(+), 12 deletions(-)
  create mode 100644 src/sse/handlers/chat/pluginOnRoute.ts
  create mode 100644 tests/unit/per-route-window.test.ts
  create mode 100644 tests/unit/plugins-onroute.test.ts
@@ -812,10 +812,10 @@ index bcea3f95..97239c95 100644
      if (
 diff --git a/src/sse/handlers/chat/pluginOnRoute.ts b/src/sse/handlers/chat/pluginOnRoute.ts
 new file mode 100644
-index 00000000..cd0e44db
+index 00000000..3c381ed0
 --- /dev/null
 +++ b/src/sse/handlers/chat/pluginOnRoute.ts
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,437 @@
 +/**
 + * Plugin `onRoute` hook for the chat handler.
 + *
@@ -1113,11 +1113,16 @@ index 00000000..cd0e44db
 +  return next as T;
 +}
 +
-+/** Allowlist `jev`, `static`, `static:cont`; anything else is omitted (never echoed). */
++/** Allowlist `jev`, `static`, `static:cont`, `static:skip`; anything else is omitted (never echoed). */
 +function normalizeRouteReason(value: unknown): string | null {
 +  if (typeof value !== "string") return null;
 +  const reason = value.trim();
-+  return reason === "jev" || reason === "static" || reason === "static:cont" ? reason : null;
++  return reason === "jev" ||
++    reason === "static" ||
++    reason === "static:cont" ||
++    reason === "static:skip"
++    ? reason
++    : null;
 +}
 +
 +/** 0..1 only; rounded to three decimals to keep the header stable (warslop parses basis points). */
@@ -1655,10 +1660,10 @@ index 00000000..9076ba5a
 +});
 diff --git a/tests/unit/plugins-onroute.test.ts b/tests/unit/plugins-onroute.test.ts
 new file mode 100644
-index 00000000..bf1ea1e5
+index 00000000..f25dd40f
 --- /dev/null
 +++ b/tests/unit/plugins-onroute.test.ts
-@@ -0,0 +1,605 @@
+@@ -0,0 +1,617 @@
 +/**
 + * tests/unit/plugins-onroute.test.ts
 + *
@@ -1887,6 +1892,18 @@ index 00000000..bf1ea1e5
 +    "x-omniroute-route": "a/x",
 +    "x-omniroute-attempts": "1",
 +    "x-router-reason": "static:cont",
++  });
++});
++
++test("buildPluginRouteHeaders: static:skip (a fresh turn with no Jev call) keeps its reason", () => {
++  const combo = buildPluginRouteCombo("free", ["a/x"], "r9s", { reason: "static:skip" });
++  const id = String(combo.traceInvocationId);
++  startComboTrace(id, { strategy: "priority", comboName: "free" });
++  recordComboOutcome(id, { target: "a/x", ok: true, status: 200, kind: null, latencyMs: 10 });
++  assert.deepEqual(buildPluginRouteHeaders(combo), {
++    "x-omniroute-route": "a/x",
++    "x-omniroute-attempts": "1",
++    "x-router-reason": "static:skip",
 +  });
 +});
 +
@@ -2278,6 +2295,3 @@ index e03efd15..65055393 100644
        "onResponse",
        "onError",
        "onInstall",
--- 
-2.47.3
-

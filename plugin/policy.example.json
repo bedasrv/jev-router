@@ -529,6 +529,9 @@
  "jev": {
   "mode": "shadow",
   "threshold": 0.5,
+  "pools": [
+   "paid"
+  ],
   "deadline_ms": 3000,
   "source_timeout_ms": 1200,
   "max_shown": {

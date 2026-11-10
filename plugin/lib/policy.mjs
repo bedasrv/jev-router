@@ -37,6 +37,10 @@ export function validate(p) {
   }
   const ss = p.jev?.skip_sessions;
   if (ss !== undefined && !(Array.isArray(ss) && ss.every((x) => typeof x === "string" && x))) throw new Error("jev.skip_sessions must be an array of session ids");
+  // UP-16: the pools Jev is asked in. Absent = both; anything else must name each pool once.
+  const jp = p.jev?.pools;
+  if (jp !== undefined && !(Array.isArray(jp) && jp.length > 0 && jp.every((x) => x === "paid" || x === "free") && new Set(jp).size === jp.length))
+    throw new Error("jev.pools must be a non-empty array of paid|free, each once");
   const sh = p.jev?.session_header;
   if (sh !== undefined && !(typeof sh === "string" && sh)) throw new Error("jev.session_header must be a header name");
   const hid = p.jev?.hidden;

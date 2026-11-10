@@ -120,3 +120,23 @@ test("UP-10c: every menu pair and item id survives the host unchanged", async ()
     for (const b of it.backups ?? []) if (b.model) assert.deepEqual(normalize(hostThinking(b.thinking)), hostThinking(b.thinking));
   }
 });
+
+// UP-16: the plugin's reason values reach the client only through the host's allowlist (read from the patch that
+// defines it), so "Jev was asked and unconfident" (static) and "Jev skipped" (static:skip) must both survive.
+function hostRouteReasonNormalizer() {
+  const lines = patchDefining("+function normalizeRouteReason(").split("\n");
+  const start = lines.findIndex((l) => l.startsWith("+function normalizeRouteReason("));
+  assert.ok(start >= 0, "normalizeRouteReason not found in the patch series");
+  const end = lines.findIndex((l, i) => i > start && l === "+}");
+  const ts = lines.slice(start, end + 1).map((l) => l.slice(1)).join("\n");
+  const js = ts.replace("(value: unknown): string | null", "(value)");
+  return new Function(`${js}\nreturn normalizeRouteReason;`)();
+}
+
+test("UP-16: the router's reason values survive the host unchanged; anything else is dropped", () => {
+  const normalizeRouteReason = hostRouteReasonNormalizer();
+  for (const reason of ["jev", "static", "static:cont", "static:skip"]) assert.equal(normalizeRouteReason(reason), reason, reason);
+  assert.equal(normalizeRouteReason("static:sticky"), null);
+  assert.equal(normalizeRouteReason("whatever"), null);
+  assert.equal(normalizeRouteReason(undefined), null);
+});

@@ -111,7 +111,8 @@ test("jev.skip_sessions: the app's canary session is never sent to Jev; other se
   let { r, logs } = mk(cfg({ mode: "on", skip_sessions: ["canary"] }), spy);
   const out = await r.onRoute(canary({ "x-opencode-session": "canary" }));
   assert.equal(calls, 0);
-  assert.equal(out.models[0], "a/p1"); assert.equal(out.reason, "static");
+  // UP-16: a skip session makes no choice call, so the reason says so (static:skip, not static).
+  assert.equal(out.models[0], "a/p1"); assert.equal(out.reason, "static:skip");
   assert.deepEqual(out.thinking, { control: "none" }); // the paid default (normal), as for an unconfident turn
   const d = logs().find((l) => l.event === "decision");
   assert.equal(d.jev_skipped, true); assert.equal(d.jev_mode, undefined);

@@ -8,6 +8,7 @@ import { createJev, buildPayload, buildMenuPayload, askText, requestSource } fro
 import { eligibleItems, attemptsFor, stickyChoice, stickyCfg, itemById, hostThinking, thinkingWord, cachedShare, specialistsIn, kindAllows, turnCostRatio } from "./lib/menu.mjs";
 import { applyThinkingToList, minFallbacks, toHostThinking } from "./lib/thinking.mjs";
 import { createHealth } from "./lib/health.mjs";
+import { isSmallTalk } from "./lib/easy.mjs";
 import { conversationKey, isFresh, createSessions, hash, headerValue, isApiSession } from "./lib/sessions.mjs";
 import { createLog } from "./lib/decision-log.mjs";
 import { windowsFor } from "./lib/windows.mjs";
@@ -25,6 +26,13 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
   let health = createHealth({ now, log: (r) => log(r) });
   let healthCfg = "";
 
+  // UP-16: Jev is asked only in the pools policy.jev.pools names (absent = both). The free pool is one route with
+  // three thinking values, so its choice buys nothing a guest pays for while every call costs money.
+  function jevPool(cfg, pool) {
+    const list = cfg?.pools;
+    return !Array.isArray(list) || list.includes(pool);
+  }
+
   // Sessions named in jev.skip_sessions (the app's upstream canaries, session "canary") are never sent to Jev:
   // every candidate can answer them, so Jev is unconfident by design and each call is only cost.
   function jevSkipped(cfg, headers) {
@@ -38,7 +46,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
   // jev.hidden: ids Jev is never shown (they stay in the order as fallback routes).
   function jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead, previous }) {
     const cfg = policy.jev;
-    if (!cfg || cfg.mode === "off" || !cfg.mode || !fresh) return null;
+    if (!jevPool(cfg, pool) || !cfg || cfg.mode === "off" || !cfg.mode || !fresh) return null;
     const cap = cfg.max_shown?.[pool] ?? (pool === "paid" ? 12 : 8);
     const hidden = new Set(cfg.hidden ?? []);
     const el = eligibleIds({ pool, policy, facts: f, req, health });
@@ -92,6 +100,9 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     const last = prevItem?.pool === pool ? prevItem : null;
     const cfg = policy.jev ?? {};
     const thr = menu.threshold ?? cfg.threshold ?? 0.85;
+    const shut = !jevPool(cfg, pool); // UP-16: this pool is left out of policy.jev.pools
+    const skipped = jevSkipped(cfg, ctx.headers);
+    const asking = !!cfg.mode && cfg.mode !== "off" && !shut && !skipped && items.length >= 2;
     let choice, jevInfo, pick = null;
 
     if (!fresh) {
@@ -99,9 +110,14 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       choice = last && ok.has(last.id)
         ? { item: last, source: "session", reason: "continuation", streak: known.streak ?? 0 }
         : { item: fallback, source: "default", reason: last ? "continuation_ineligible" : "continuation_unknown", streak: 0 };
+    } else if (shut) {
+      // UP-16: no choice call on this pool. The pool default answers; the UP-2a small-talk list may still lower the
+      // effort, but only within the default item's own model (a lighter pair, never a different model).
+      const same = items.filter((i) => i.model === fallback.model);
+      const light = same.reduce((a, b) => (b.rank < a.rank ? b : a), same[0]);
+      const easy = pool === "free" && !api && light.rank < fallback.rank && isSmallTalk(askText(body));
+      choice = { item: easy ? light : fallback, source: "default", reason: easy ? "easy" : "pool_default", streak: 0 };
     } else {
-      const skipped = jevSkipped(cfg, ctx.headers);
-      const asking = cfg.mode && cfg.mode !== "off" && !skipped && items.length >= 2;
       if (asking) {
         const previous = !api && last ? { item: last.id } : null;
         // Addendum item 9: while a specialist is on offer Jev also names the task kind; a specialist pick stands only when
@@ -148,12 +164,15 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
       attempts: attempts.map((a) => ({ m: a.model, thinking: thinkingWord(a.thinking), from: a.from })),
       source: choice.source, sticky: choice.reason, streak: choice.streak || undefined, last: last?.id,
       confidence: jevInfo?.confidence, jev: jevInfo, excluded: excluded.length ? excluded : undefined,
+      jev_skipped: fresh && !asking ? true : undefined,
       skipped: skippedTargets.length ? skippedTargets : undefined, short: short || undefined,
       cached_share: req.tokens ? Math.round(cachedShare(body) * 1000) / 1000 : undefined,
     });
     return {
       models,
-      reason: choice.source === "jev" ? "jev" : !fresh ? "static:cont" : "static",
+      // UP-16: static is a real choice call that did not apply (asked and unconfident/unavailable); static:skip says no
+      // call was made (pool left out, mode off, skip session, fewer than two items), so warslop's LIM-8 stops drawing.
+      reason: choice.source === "jev" ? "jev" : !fresh ? "static:cont" : asking ? "static" : "static:skip",
       ...(choice.source === "jev" && jevInfo?.confidence !== undefined ? { confidence: jevInfo.confidence } : {}),
       item: choice.item.id,
       specialist, // addendum item 11: the app decides how to show a specialist answer
@@ -199,6 +218,7 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     let desiredEffort = null, effortSource = null;
     const skipped = jevSkipped(policy.jev, ctx.headers);
     const step = models.length && !skipped ? jevStep({ ctx, pool, policy, f, req, body, key, fresh, staticHead: models[0], previous: fresh && known && !api ? known : null }) : null;
+    const asked = !!step; // jevStep returns null when the pool is left out, the mode is off or fewer than two are shown
     if (step?.mode === "on") {
       const out = await step.promise;
       if (out?.res.ok && out.res.confidence >= out.thr) {
@@ -243,14 +263,16 @@ export function createRouter({ policyFile = process.env.JEV_POLICY_FILE ?? path.
     sessions.set(key, { head: models[0], effort: desiredEffort ?? null }, now());
     log({
       event: "decision", id: ctx.requestId ?? null, pool, conv: hash(key), fresh, sticky: sticky || undefined, est_tokens: req.tokens, reserve: req.reserve,
-      tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode, jev_skipped: skipped || undefined, effort: effortInfo, demoted: cooling?.length ? cooling : undefined,
+      tools: req.usesTools, images: req.images, nofit, excluded: excluded.length ? excluded : undefined, models, jev: jevInfo, jev_mode: step?.mode, jev_skipped: fresh && !asked ? true : undefined, effort: effortInfo, demoted: cooling?.length ? cooling : undefined,
     });
-    // Response-header provenance (patch 0007): reason is jev | static[:cont]; confidence
+    // Response-header provenance (patch 0007): reason is jev | static[:cont|:skip|:sticky]; confidence
     // only when Jev's pick was applied. The pool itself is already the request model.
     const windows = windowsFor(models, f);
     return {
       models,
-      reason: jevInfo ? "jev" : !fresh ? "static:cont" : sticky ? "static:sticky" : "static",
+      // UP-16: static means a real choice call that did not apply; static:skip means none was made (pool left out,
+      // mode off, skip session, fewer than two models), so warslop's LIM-8 stops drawing for it.
+      reason: jevInfo ? "jev" : !fresh ? "static:cont" : !asked ? "static:skip" : sticky ? "static:sticky" : "static",
       ...(jevInfo ? { confidence: jevInfo.confidence } : {}),
       // Applied native control as {control, value} (the 0008 wire shape; the log keeps `native`),
       // or an explicit none/clear when normal/free/no mapping wins.
